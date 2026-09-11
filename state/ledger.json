@@ -1,7 +1,14 @@
 {
   "schemaVersion": 1,
-  "lastRevision": 1,
-  "highestPublishedVersion": null,
-  "releases": {},
+  "lastRevision": 1789142606558,
+  "highestPublishedVersion": "0.8.1",
+  "releases": {
+    "v0.8.1": {
+      "version": "0.8.1",
+      "archiveSHA256": "34664aba757285ca7915bf7d2bb86be583d7906c5697b9d3c59c6c06c9ee5e68",
+      "publishedRevision": 1789142606558,
+      "status": "published"
+    }
+  },
   "withdrawnTags": []
 }

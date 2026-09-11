@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "operation": "publish",
+  "releaseTag": "v0.8.1",
+  "requestId": "acceptance-withdraw-minimum-20260912",
+  "runId": "34628559841",
+  "runAttempt": "1",
+  "recordedAt": "2026-09-11T17:35:49Z",
+  "result": "noop",
+  "feedRevisionBefore": 1789142606558,
+  "feedRevisionAfter": 1789142606558,
+  "ledgerChanged": false
+}

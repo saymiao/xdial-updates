@@ -1,0 +1,97 @@
+name: Publish stable feed
+run-name: Publish ${{ inputs.release_tag }} [${{ inputs.request_id }}]
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published stable XDial tag, for example v0.8.1
+        required: true
+        type: string
+      operation:
+        description: Publish or withdraw the named current release
+        required: true
+        default: publish
+        type: choice
+        options:
+          - publish
+          - withdraw
+      request_id:
+        description: Optional caller correlation ID
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: stable-feed-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the latest publisher state
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Fast-forward to the latest main
+        run: git pull --ff-only origin main
+
+      - name: Verify release and generate feed state
+        env:
+          OPERATION: ${{ inputs.operation }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REQUEST_ID: ${{ inputs.request_id }}
+        run: |
+          python3 scripts/publish_feed.py \
+            --operation "$OPERATION" \
+            --release-tag "$RELEASE_TAG" \
+            --request-id "$REQUEST_ID" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}"
+
+      - name: Commit generated metadata
+        env:
+          OPERATION: ${{ inputs.operation }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          git add -- site/stable.json state/ledger.json state/history state/audit
+          if git diff --cached --quiet; then
+            echo "Generated state is already committed."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "feed: ${OPERATION} ${RELEASE_TAG}"
+            git push origin HEAD:main
+          fi
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Upload complete static site
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: site
+
+      - name: Deploy verified feed
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+
+      - name: Verify canonical deployed feed
+        run: |
+          python3 scripts/verify_deployment.py \
+            --expected site/stable.json \
+            --url https://saymiao.github.io/xdial-updates/stable.json

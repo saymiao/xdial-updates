@@ -1,7 +1,17 @@
 {
   "schemaVersion": 1,
-  "revision": 1789148122370,
+  "revision": 1789148679620,
   "channel": "stable",
-  "generatedAt": "2026-09-11T17:35:22Z",
-  "release": null
+  "generatedAt": "2026-09-11T17:44:39Z",
+  "release": {
+    "tag": "v0.8.3",
+    "version": "0.8.3",
+    "build": "1789148435",
+    "minimumSystemVersion": "15.0",
+    "archiveSize": 53602566,
+    "archiveSHA256": "21de1bba29344739b8750003e4246d783c3aec37645ebb1e680adea4553ebf7b",
+    "releaseNotes": "- 从 GitHub Pages 获取版本、更新说明和安装包信息。\n- 下载后校验大小、SHA-256、签名及组件版本，安装前重新确认更新有效。\n- 修正本机构建的 helper 最低系统版本，保持 macOS 15 兼容声明。\n- 仅供正式身份更新验收，不进入正式更新清单。\n",
+    "archiveURL": "https://github.com/saymiao/xdial-updates/releases/download/v0.8.3/XDial-v0.8.3.zip",
+    "publishedAt": "2026-09-11T17:43:51Z"
+  }
 }

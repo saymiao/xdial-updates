@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "revision": 1789146508395,
+  "channel": "stable",
+  "generatedAt": "2026-09-11T17:08:28Z",
+  "release": {
+    "tag": "v0.8.2",
+    "version": "0.8.2",
+    "build": "1789146116",
+    "minimumSystemVersion": "15.0",
+    "archiveSize": 53602565,
+    "archiveSHA256": "a19be1cb8e309932e38be2fea809ef7f63b950caeebcc01a15fa74c595164ace",
+    "releaseNotes": "- 从 GitHub Pages 获取版本、完整更新说明和安装包信息。\n- 下载后核对大小、SHA-256、签名及组件版本，安装前重新确认更新仍有效。\n- 此包仅用于正式身份的更新验收，不进入正式更新清单。",
+    "archiveURL": "https://github.com/saymiao/xdial-updates/releases/download/v0.8.2/XDial-v0.8.2.zip",
+    "publishedAt": "2026-09-11T17:07:15Z"
+  }
+}

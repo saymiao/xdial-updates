@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "operation": "publish",
+  "releaseTag": "v0.9.2",
+  "requestId": "b22d56af47414af29d2bcc9b99d782c8",
+  "runId": "38482703126",
+  "runAttempt": "1",
+  "recordedAt": "2026-10-13T23:11:45Z",
+  "result": "updated",
+  "feedRevisionBefore": 1790405377249,
+  "feedRevisionAfter": 1791933105360,
+  "ledgerChanged": true
+}

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "lastRevision": 1790405377249,
-  "highestPublishedVersion": "0.9.1",
+  "lastRevision": 1791933105360,
+  "highestPublishedVersion": "0.9.2",
   "releases": {
     "v0.8.1": {
       "version": "0.8.1",
@@ -31,6 +31,12 @@
       "version": "0.9.1",
       "archiveSHA256": "30655048ec3757d46e749b7a27d7d8c06a539df13b21acaebdda74aa5e0cbf20",
       "publishedRevision": 1790405377249,
+      "status": "published"
+    },
+    "v0.9.2": {
+      "version": "0.9.2",
+      "archiveSHA256": "03647fcec7be4c2feb80a4c808d625d9e0a967dfebc406d79c40ec334df8c58b",
+      "publishedRevision": 1791933105360,
       "status": "published"
     }
   },

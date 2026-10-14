@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "revision": 1791936905327,
+  "revision": 1791940209492,
   "channel": "stable",
-  "generatedAt": "2026-10-14T00:15:05Z",
+  "generatedAt": "2026-10-14T01:10:09Z",
   "release": {
-    "tag": "v0.9.3",
-    "version": "0.9.3",
-    "build": "1791936384",
+    "tag": "v0.9.4",
+    "version": "0.9.4",
+    "build": "1791939697",
     "minimumSystemVersion": "15.0",
-    "publishedAt": "2026-10-14T00:14:50Z",
-    "releaseNotes": "- 修复首次安装或升级时，偶发的「后台服务注册已更新，但未能建立本地控制通道」：系统接受了后台服务登记，却没有启动它时，安装流程会自动重建一次登记，不再需要手动点「重试」。",
-    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.3/XDial-v0.9.3.zip",
-    "archiveSize": 55970255,
-    "archiveSHA256": "9cdd9e36ab9d8cc1f7de221756bae1351dfbb40ee657127eaa8caed84eb6edbe"
+    "publishedAt": "2026-10-14T01:09:52Z",
+    "releaseNotes": "- 任何时候都能退出 XDial。以前安装停在等待系统批准时，App 既退不出，也无法被新版替换。\n- 更新时不再被旧版卡住：旧版 20 秒内没有退出，新版会强制结束它并完成替换。\n- 已经开始的安装在退出或更新后会自动接着进行，并重新打开安装窗口。\n- 等待批准网络扩展或后台服务时，安装窗口新增「打开系统设置」按钮，并写明开关的具体位置。",
+    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.4/XDial-v0.9.4.zip",
+    "archiveSize": 55975688,
+    "archiveSHA256": "169093386610a121f4242341ded70d02316c4598b69ee4a90b74de204abee1c1"
   }
 }

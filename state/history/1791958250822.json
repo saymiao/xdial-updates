@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "revision": 1791958250822,
+  "channel": "stable",
+  "generatedAt": "2026-10-14T06:10:50Z",
+  "release": {
+    "tag": "v0.9.6",
+    "version": "0.9.6",
+    "build": "1791957737",
+    "minimumSystemVersion": "15.0",
+    "publishedAt": "2026-10-14T06:10:34Z",
+    "releaseNotes": "- 新增本机 SOCKS5 代理：其他程序把 SOCKS5 代理设为 `127.0.0.1:5181`（端口可改），就按当前场景分流。端口只接受本机连接，仅支持 TCP。\n- 新增连接方式「仅 SOCKS5」：XDial 不接管系统流量、不改系统 DNS，只有设置了本机 SOCKS5 代理的程序经过 XDial。在「通用 › 启动与连接」中切换，默认仍是「接管系统」。\n- 「仅 SOCKS5」连接时，菜单栏图标、弹窗标题和场景都改用紫色，并常驻提示「系统流量没有经过 XDial」；点击标题旁的「仅 SOCKS5」可直接打开对应设置。已连接时切换连接方式，确认「应用并重连」后才生效。\n- 切换到使用另一条 AnyConnect 线路的场景时，会先断开当前连接再连接目标场景，不再停在原场景报错。\n- 场景因 AnyConnect 线路缺少用户名或密码而无法连接时，弹窗会说明缺什么，并可直接打开对应线路填写。\n- 修复企业预置配置中的线路无法填写用户名和密码的问题。",
+    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.6/XDial-v0.9.6.zip",
+    "archiveSize": 56108093,
+    "archiveSHA256": "70598f4001a3b49ca14fa77f453e53721803887be26dbb23dec35913ef1a04e1"
+  }
+}

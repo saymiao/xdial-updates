@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "revision": 1791940209492,
+  "revision": 1791958250822,
   "channel": "stable",
-  "generatedAt": "2026-10-14T01:10:09Z",
+  "generatedAt": "2026-10-14T06:10:50Z",
   "release": {
-    "tag": "v0.9.4",
-    "version": "0.9.4",
-    "build": "1791939697",
+    "tag": "v0.9.6",
+    "version": "0.9.6",
+    "build": "1791957737",
     "minimumSystemVersion": "15.0",
-    "publishedAt": "2026-10-14T01:09:52Z",
-    "releaseNotes": "- 任何时候都能退出 XDial。以前安装停在等待系统批准时，App 既退不出，也无法被新版替换。\n- 更新时不再被旧版卡住：旧版 20 秒内没有退出，新版会强制结束它并完成替换。\n- 已经开始的安装在退出或更新后会自动接着进行，并重新打开安装窗口。\n- 等待批准网络扩展或后台服务时，安装窗口新增「打开系统设置」按钮，并写明开关的具体位置。",
-    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.4/XDial-v0.9.4.zip",
-    "archiveSize": 55975688,
-    "archiveSHA256": "169093386610a121f4242341ded70d02316c4598b69ee4a90b74de204abee1c1"
+    "publishedAt": "2026-10-14T06:10:34Z",
+    "releaseNotes": "- 新增本机 SOCKS5 代理：其他程序把 SOCKS5 代理设为 `127.0.0.1:5181`（端口可改），就按当前场景分流。端口只接受本机连接，仅支持 TCP。\n- 新增连接方式「仅 SOCKS5」：XDial 不接管系统流量、不改系统 DNS，只有设置了本机 SOCKS5 代理的程序经过 XDial。在「通用 › 启动与连接」中切换，默认仍是「接管系统」。\n- 「仅 SOCKS5」连接时，菜单栏图标、弹窗标题和场景都改用紫色，并常驻提示「系统流量没有经过 XDial」；点击标题旁的「仅 SOCKS5」可直接打开对应设置。已连接时切换连接方式，确认「应用并重连」后才生效。\n- 切换到使用另一条 AnyConnect 线路的场景时，会先断开当前连接再连接目标场景，不再停在原场景报错。\n- 场景因 AnyConnect 线路缺少用户名或密码而无法连接时，弹窗会说明缺什么，并可直接打开对应线路填写。\n- 修复企业预置配置中的线路无法填写用户名和密码的问题。",
+    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.6/XDial-v0.9.6.zip",
+    "archiveSize": 56108093,
+    "archiveSHA256": "70598f4001a3b49ca14fa77f453e53721803887be26dbb23dec35913ef1a04e1"
   }
 }

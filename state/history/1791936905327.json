@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "revision": 1791936905327,
+  "channel": "stable",
+  "generatedAt": "2026-10-14T00:15:05Z",
+  "release": {
+    "tag": "v0.9.3",
+    "version": "0.9.3",
+    "build": "1791936384",
+    "minimumSystemVersion": "15.0",
+    "publishedAt": "2026-10-14T00:14:50Z",
+    "releaseNotes": "- 修复首次安装或升级时，偶发的「后台服务注册已更新，但未能建立本地控制通道」：系统接受了后台服务登记，却没有启动它时，安装流程会自动重建一次登记，不再需要手动点「重试」。",
+    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.3/XDial-v0.9.3.zip",
+    "archiveSize": 55970255,
+    "archiveSHA256": "9cdd9e36ab9d8cc1f7de221756bae1351dfbb40ee657127eaa8caed84eb6edbe"
+  }
+}

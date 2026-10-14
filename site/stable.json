@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "revision": 1791933105360,
+  "revision": 1791936905327,
   "channel": "stable",
-  "generatedAt": "2026-10-13T23:11:45Z",
+  "generatedAt": "2026-10-14T00:15:05Z",
   "release": {
-    "tag": "v0.9.2",
-    "version": "0.9.2",
-    "build": "1791932491",
+    "tag": "v0.9.3",
+    "version": "0.9.3",
+    "build": "1791936384",
     "minimumSystemVersion": "15.0",
-    "publishedAt": "2026-10-13T23:10:57Z",
-    "releaseNotes": "- 线路类型「VPN」改称「AnyConnect」，与 iOS、tvOS 版一致。\n- 菜单栏弹窗顶部新增退出按钮；在弹窗和任意 XDial 窗口中按 ⌘, 都能打开设置。\n- 添加场景时直接创建一个空白场景并展开定位，不再弹出模板菜单。\n- 线路组成员列表中，「自动选择」与各成员并列显示。\n- 修复唤醒后自动重连仍在准备时，被误判为「上一次连接事务未完成」而中止的问题。\n- 修复网络切换后经 Tailscale 中继的出口持续超时：失效的非主 DERP 连接会被及时释放。\n- 支持企业打包版预置配置：首次运行时把预置的线路、规则和场景加入现有配置，不改变当前场景和连接；后续版本可更新预置内容，并保留已填写的账号密码。",
-    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.2/XDial-v0.9.2.zip",
-    "archiveSize": 55970718,
-    "archiveSHA256": "03647fcec7be4c2feb80a4c808d625d9e0a967dfebc406d79c40ec334df8c58b"
+    "publishedAt": "2026-10-14T00:14:50Z",
+    "releaseNotes": "- 修复首次安装或升级时，偶发的「后台服务注册已更新，但未能建立本地控制通道」：系统接受了后台服务登记，却没有启动它时，安装流程会自动重建一次登记，不再需要手动点「重试」。",
+    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.3/XDial-v0.9.3.zip",
+    "archiveSize": 55970255,
+    "archiveSHA256": "9cdd9e36ab9d8cc1f7de221756bae1351dfbb40ee657127eaa8caed84eb6edbe"
   }
 }

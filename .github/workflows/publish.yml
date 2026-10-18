@@ -1,21 +1,37 @@
-name: Publish stable feed
-run-name: Publish ${{ inputs.release_tag }} [${{ inputs.request_id }}]
+name: Publish update feed
+# Callers find their run by the request ID in the run name; keep it there.
+run-name: ${{ inputs.operation }} ${{ inputs.channel || 'stable' }} ${{ inputs.release_tag || inputs.history_revision }} [${{ inputs.request_id }}]
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Published stable XDial tag, for example v0.8.1
-        required: true
+        description: Tag to publish or withdraw (vX.Y.Z for stable, vX.Y.Z-beta.N for beta); empty for restore
+        required: false
+        default: ""
         type: string
       operation:
-        description: Publish or withdraw the named current release
+        description: Publish a release, withdraw the current release, or restore a history revision
         required: true
         default: publish
         type: choice
         options:
           - publish
           - withdraw
+          - restore
+      channel:
+        description: Feed channel (stable.json or beta.json)
+        required: false
+        default: stable
+        type: choice
+        options:
+          - stable
+          - beta
+      history_revision:
+        description: Restore only; the revision under the channel's state history to republish
+        required: false
+        default: ""
+        type: string
       request_id:
         description: Optional caller correlation ID
         required: false
@@ -27,6 +43,10 @@ permissions:
   pages: write
   id-token: write
 
+# One global group for every channel and operation, because each run deploys
+# the whole site/. GitHub keeps at most one running and one pending run per
+# group: a newer dispatch cancels the pending one, so wait for a run to finish
+# before dispatching the next. The name predates channels; keep it unchanged.
 concurrency:
   group: stable-feed-publisher
   cancel-in-progress: false
@@ -50,15 +70,30 @@ jobs:
       - name: Fast-forward to the latest main
         run: git pull --ff-only origin main
 
+      - name: Require the state of both channels
+        # The build gate compares against both channels' history; refuse to run
+        # if either channel's feed or ledger is missing.
+        run: |
+          for path in site/stable.json state/ledger.json site/beta.json state/beta/ledger.json; do
+            if [ ! -f "$path" ]; then
+              echo "::error::missing $path; restore it from git history before publishing"
+              exit 1
+            fi
+          done
+
       - name: Verify release and generate feed state
         env:
           OPERATION: ${{ inputs.operation }}
+          CHANNEL: ${{ inputs.channel || 'stable' }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          HISTORY_REVISION: ${{ inputs.history_revision }}
           REQUEST_ID: ${{ inputs.request_id }}
         run: |
           python3 scripts/publish_feed.py \
             --operation "$OPERATION" \
+            --channel "$CHANNEL" \
             --release-tag "$RELEASE_TAG" \
+            --history-revision "$HISTORY_REVISION" \
             --request-id "$REQUEST_ID" \
             --run-id "${{ github.run_id }}" \
             --run-attempt "${{ github.run_attempt }}"
@@ -66,17 +101,40 @@ jobs:
       - name: Commit generated metadata
         env:
           OPERATION: ${{ inputs.operation }}
+          CHANNEL: ${{ inputs.channel || 'stable' }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          HISTORY_REVISION: ${{ inputs.history_revision }}
         run: |
           git add -- site/stable.json state/ledger.json state/history state/audit
+          git add -- site/beta.json state/beta
+          if [ "$OPERATION" = restore ]; then
+            subject="feed: restore ${CHANNEL} revision ${HISTORY_REVISION}"
+          elif [ "$CHANNEL" = stable ]; then
+            subject="feed: ${OPERATION} ${RELEASE_TAG}"
+          else
+            subject="feed: ${OPERATION} ${CHANNEL} ${RELEASE_TAG}"
+          fi
           if git diff --cached --quiet; then
             echo "Generated state is already committed."
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "feed: ${OPERATION} ${RELEASE_TAG}"
+            git commit -m "$subject"
             git push origin HEAD:main
           fi
+
+      - name: Report other channel changes in this deployment
+        # Warning only. The whole site/ is uploaded, so the other channel's
+        # committed feed goes live too, even if an earlier run did not deploy it.
+        env:
+          CHANNEL: ${{ inputs.channel || 'stable' }}
+        run: |
+          for other in stable beta; do
+            if [ "$other" != "$CHANNEL" ]; then
+              python3 scripts/verify_deployment.py \
+                --channel "$other" --expected "site/$other.json" --report-only
+            fi
+          done
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
@@ -90,8 +148,15 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
 
-      - name: Verify canonical deployed feed
+      - name: Verify canonical deployed feeds
         run: |
           python3 scripts/verify_deployment.py \
+            --channel stable \
             --expected site/stable.json \
             --url https://saymiao.github.io/xdial-updates/stable.json
+          if [ -e site/beta.json ]; then
+            python3 scripts/verify_deployment.py \
+              --channel beta \
+              --expected site/beta.json \
+              --url https://saymiao.github.io/xdial-updates/beta.json
+          fi

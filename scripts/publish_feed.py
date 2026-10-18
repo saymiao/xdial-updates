@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify an XDial release and update the static stable feed."""
+"""Verify an XDial release and update a static update feed (stable or beta)."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -26,6 +27,10 @@ MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_CHECKSUM_BYTES = 4 * 1024
 MAX_FEED_BYTES = 512 * 1024
 TAG_PATTERN = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+BETA_TAG_PATTERN = re.compile(
+    r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.([1-9][0-9]*)\Z"
+)
+REVISION_PATTERN = re.compile(r"[1-9][0-9]*\Z")
 BUILD_PATTERN = re.compile(r"[1-9][0-9]*\Z")
 SYSTEM_VERSION_PATTERN = re.compile(r"(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*)){1,2}\Z")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
@@ -33,6 +38,26 @@ RFC3339_UTC_SECONDS_PATTERN = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z"
 )
 ACCEPTED_NOTES_HEADINGS = {"更新了什么", "更新内容", "更新"}
+
+STABLE = "stable"
+BETA = "beta"
+CHANNELS = (STABLE, BETA)
+OPERATIONS = ("publish", "withdraw", "restore")
+
+
+@dataclass(frozen=True)
+class ChannelPaths:
+    feed: str
+    ledger: str
+    history: str
+    audit: str
+
+
+# Stable keeps the layout it had before channels existed; beta is fully separate.
+CHANNEL_PATHS = {
+    STABLE: ChannelPaths("site/stable.json", "state/ledger.json", "state/history", "state/audit"),
+    BETA: ChannelPaths("site/beta.json", "state/beta/ledger.json", "state/beta/history", "state/beta/audit"),
+}
 
 FEED_KEYS = {"schemaVersion", "revision", "channel", "generatedAt", "release"}
 RELEASE_KEYS = {
@@ -106,6 +131,42 @@ def parse_tag(tag: Any) -> tuple[int, int, int]:
     match = TAG_PATTERN.fullmatch(tag)
     require(match is not None, "release tag must be canonical vMAJOR.MINOR.PATCH")
     return tuple(int(component) for component in match.groups())  # type: ignore[return-value]
+
+
+def require_channel(channel: Any) -> None:
+    require(channel in CHANNELS, f"unsupported channel: {channel}")
+
+
+def parse_beta_tag(tag: Any) -> tuple[int, int, int, int]:
+    require(isinstance(tag, str), "release tag must be a string")
+    match = BETA_TAG_PATTERN.fullmatch(tag)
+    require(match is not None, "beta release tag must be canonical vMAJOR.MINOR.PATCH-beta.N")
+    return tuple(int(component) for component in match.groups())  # type: ignore[return-value]
+
+
+def tag_key(tag: Any, channel: str) -> tuple[int, ...]:
+    """Return the ordering key of a tag that belongs to the given channel.
+
+    Stable keys are (MAJOR, MINOR, PATCH); beta keys add N from -beta.N. A tag of
+    the other channel's form is rejected with an explicit message.
+    """
+    require_channel(channel)
+    if channel == STABLE:
+        require(
+            not (isinstance(tag, str) and "-beta" in tag.lower()),
+            "beta tags cannot be published to the stable channel",
+        )
+        return parse_tag(tag)
+    require(
+        not (isinstance(tag, str) and TAG_PATTERN.fullmatch(tag) is not None),
+        "stable tags cannot be published to the beta channel",
+    )
+    return parse_beta_tag(tag)
+
+
+def tag_version(tag: Any, channel: str) -> tuple[int, int, int]:
+    """Return the MAJOR.MINOR.PATCH that every bundle of this tag must carry."""
+    return tag_key(tag, channel)[:3]  # type: ignore[return-value]
 
 
 def release_notes(body: Any) -> str:
@@ -300,7 +361,9 @@ def plist_string(plist: dict[str, Any], key: str, path: str) -> str:
     return value
 
 
-def validate_archive(path: Path, version: str) -> dict[str, str]:
+def validate_archive(path: Path, version: str, channel: str = STABLE,
+                     tag: str | None = None) -> dict[str, str]:
+    require_channel(channel)
     size = path.stat().st_size
     require(0 < size <= MAX_ARCHIVE_BYTES, "archive size must be between 1 byte and 512 MiB")
     try:
@@ -352,19 +415,34 @@ def validate_archive(path: Path, version: str) -> dict[str, str]:
     host = found["XDial.app/Contents/Info.plist"]
     require(
         host.get("XDialUpdateAcceptanceID") in (None, ""),
-        "acceptance update archives cannot be published to stable",
+        f"acceptance update archives cannot be published to {channel}",
     )
+    if channel == BETA:
+        require(isinstance(tag, str), "beta archive validation requires the release tag")
+        for plist_path in BUNDLES:
+            plist = found[plist_path]
+            if "XDialReleaseTag" in plist:
+                require(
+                    plist["XDialReleaseTag"] == tag,
+                    f"{plist_path} XDialReleaseTag does not match {tag}",
+                )
     require(len(builds) == 1, "host, settings UI, and extension build numbers differ")
     require(len(minimum_versions) == 1, "host, settings UI, and extension minimum OS versions differ")
     return {"build": builds.pop(), "minimumSystemVersion": minimum_versions.pop()}
 
 
 def verify_release(release: dict[str, Any], requested_tag: str, archive: Path,
-                   checksum: Path) -> dict[str, Any]:
-    version_tuple = parse_tag(requested_tag)
+                   checksum: Path, channel: str = STABLE) -> dict[str, Any]:
+    version_tuple = tag_version(requested_tag, channel)
     require(release.get("tag_name") == requested_tag, "GitHub returned a different release tag")
     require(release.get("draft") is False, "draft releases cannot be published")
-    require(release.get("prerelease") is False, "prereleases cannot be published")
+    if channel == STABLE:
+        require(release.get("prerelease") is False, "prereleases cannot be published")
+    else:
+        require(
+            release.get("prerelease") is True,
+            "beta releases must be published as GitHub prereleases",
+        )
     require(release.get("published_at") is not None, "release is not published")
     published_at = parse_iso8601(release["published_at"], "published_at")
     require(published_at <= utc_now() + dt.timedelta(minutes=5), "release published_at is in the future")
@@ -387,7 +465,9 @@ def verify_release(release: dict[str, Any], requested_tag: str, archive: Path,
     validate_api_digest(archive_asset, actual_sha)
     validate_api_digest(checksum_asset, sha256_file(checksum))
 
-    bundle = validate_archive(archive, ".".join(str(value) for value in version_tuple))
+    bundle = validate_archive(
+        archive, ".".join(str(value) for value in version_tuple), channel, requested_tag
+    )
     return {
         "tag": requested_tag,
         "version": ".".join(str(value) for value in version_tuple),
@@ -401,9 +481,9 @@ def verify_release(release: dict[str, Any], requested_tag: str, archive: Path,
     }
 
 
-def validate_release_record(record: Any) -> None:
+def validate_release_record(record: Any, channel: str = STABLE) -> None:
     require(isinstance(record, dict) and set(record) == RELEASE_KEYS, "feed release fields are invalid")
-    version = parse_tag(record["tag"])
+    version = tag_version(record["tag"], channel)
     require(record["version"] == ".".join(str(value) for value in version), "feed tag and version differ")
     require(BUILD_PATTERN.fullmatch(record["build"]) is not None, "feed build is invalid")
     require(SYSTEM_VERSION_PATTERN.fullmatch(record["minimumSystemVersion"]) is not None, "feed minimum OS is invalid")
@@ -414,25 +494,27 @@ def validate_release_record(record: Any) -> None:
     require(isinstance(record["archiveSHA256"], str) and SHA256_PATTERN.fullmatch(record["archiveSHA256"]) is not None, "feed SHA-256 is invalid")
 
 
-def validate_feed(feed: Any) -> None:
-    require(isinstance(feed, dict) and set(feed) == FEED_KEYS, "stable feed fields are invalid")
-    require(feed["schemaVersion"] == 1, "unsupported stable feed schema")
+def validate_feed(feed: Any, channel: str = STABLE) -> None:
+    require_channel(channel)
+    require(isinstance(feed, dict) and set(feed) == FEED_KEYS, f"{channel} feed fields are invalid")
+    require(feed["schemaVersion"] == 1, f"unsupported {channel} feed schema")
     require(type(feed["revision"]) is int and feed["revision"] > 0, "feed revision must be positive")
-    require(feed["channel"] == "stable", "feed channel must be stable")
+    require(feed["channel"] == channel, f"feed channel must be {channel}")
     parse_feed_timestamp(feed["generatedAt"], "feed generatedAt")
     if feed["release"] is not None:
-        validate_release_record(feed["release"])
+        validate_release_record(feed["release"], channel)
 
 
 def json_payload(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=False) + "\n").encode("utf-8")
 
 
-def validate_feed_size(feed: Any) -> None:
-    require(len(json_payload(feed)) <= MAX_FEED_BYTES, "stable feed exceeds 512 KiB")
+def validate_feed_size(feed: Any, channel: str = STABLE) -> None:
+    require(len(json_payload(feed)) <= MAX_FEED_BYTES, f"{channel} feed exceeds 512 KiB")
 
 
-def validate_ledger(ledger: Any, feed: dict[str, Any]) -> None:
+def validate_ledger(ledger: Any, feed: dict[str, Any], channel: str = STABLE) -> None:
+    require_channel(channel)
     require(isinstance(ledger, dict) and set(ledger) == LEDGER_KEYS, "ledger fields are invalid")
     require(ledger["schemaVersion"] == 1, "unsupported ledger schema")
     require(type(ledger["lastRevision"]) is int and ledger["lastRevision"] == feed["revision"], "ledger and feed revisions differ")
@@ -442,7 +524,7 @@ def validate_ledger(ledger: Any, feed: dict[str, Any]) -> None:
     require(isinstance(ledger["releases"], dict), "ledger releases must be an object")
     release_versions: list[tuple[int, int, int]] = []
     for tag, record in ledger["releases"].items():
-        tag_version = parse_tag(tag)
+        release_version = tag_version(tag, channel)
         require(isinstance(record, dict), f"ledger record for {tag} is invalid")
         status = record.get("status")
         expected_keys = {"version", "archiveSHA256", "publishedRevision", "status"}
@@ -450,18 +532,18 @@ def validate_ledger(ledger: Any, feed: dict[str, Any]) -> None:
             expected_keys.add("withdrawnRevision")
         require(set(record) == expected_keys, f"ledger record fields for {tag} are invalid")
         require(status in {"published", "withdrawn"}, f"ledger status for {tag} is invalid")
-        require(record["version"] == ".".join(str(value) for value in tag_version), f"ledger tag and version differ for {tag}")
+        require(record["version"] == ".".join(str(value) for value in release_version), f"ledger tag and version differ for {tag}")
         require(isinstance(record["archiveSHA256"], str) and SHA256_PATTERN.fullmatch(record["archiveSHA256"]) is not None, f"ledger SHA-256 for {tag} is invalid")
         published_revision = record["publishedRevision"]
         require(type(published_revision) is int and 0 < published_revision <= ledger["lastRevision"], f"ledger publish revision for {tag} is invalid")
         if status == "withdrawn":
             withdrawn_revision = record["withdrawnRevision"]
             require(type(withdrawn_revision) is int and published_revision < withdrawn_revision <= ledger["lastRevision"], f"ledger withdrawal revision for {tag} is invalid")
-        release_versions.append(tag_version)
+        release_versions.append(release_version)
     withdrawn = ledger["withdrawnTags"]
     require(isinstance(withdrawn, list) and len(withdrawn) == len(set(withdrawn)), "withdrawn tags must be unique")
     for tag in withdrawn:
-        parse_tag(tag)
+        tag_key(tag, channel)
         require(tag in ledger["releases"], "withdrawn tag is absent from release ledger")
         require(ledger["releases"][tag]["status"] == "withdrawn", "withdrawn tag has the wrong ledger status")
     if release_versions:
@@ -497,28 +579,111 @@ def load_json(path: Path) -> Any:
         raise PublishError(f"cannot read valid JSON from {path}") from error
 
 
-def apply_operation(root: Path, operation: str, tag: str, verified: dict[str, Any] | None,
-                    request_id: str, run_id: str, run_attempt: str,
-                    now: dt.datetime | None = None) -> str:
-    now = now or utc_now()
-    parse_tag(tag)
-    feed_path = root / "site/stable.json"
-    ledger_path = root / "state/ledger.json"
+@dataclass(frozen=True)
+class PublishedPackage:
+    channel: str
+    tag: str
+    version: tuple[int, int, int]
+    build: int
+
+
+def load_channel_state(root: Path, channel: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load and validate one channel's current feed and ledger."""
+    paths = CHANNEL_PATHS[channel]
+    feed_path = root / paths.feed
     feed = load_json(feed_path)
-    ledger = load_json(ledger_path)
-    validate_feed(feed)
-    require(feed_path.stat().st_size <= MAX_FEED_BYTES, "existing stable feed exceeds 512 KiB")
-    validate_feed_size(feed)
-    validate_ledger(ledger, feed)
-    history_path = root / f"state/history/{feed['revision']}.json"
+    ledger = load_json(root / paths.ledger)
+    validate_feed(feed, channel)
+    require(feed_path.stat().st_size <= MAX_FEED_BYTES, f"existing {channel} feed exceeds 512 KiB")
+    validate_feed_size(feed, channel)
+    validate_ledger(ledger, feed, channel)
+    return feed, ledger
+
+
+def other_channel_ledger(root: Path, channel: str) -> tuple[str, dict[str, Any]] | None:
+    """Return the other channel's validated ledger, or None if it was never created."""
+    other = BETA if channel == STABLE else STABLE
+    paths = CHANNEL_PATHS[other]
+    if not (root / paths.feed).exists() and not (root / paths.ledger).exists():
+        return None
+    return other, load_channel_state(root, other)[1]
+
+
+def published_packages(root: Path, channel: str, ledger: dict[str, Any]) -> list[PublishedPackage]:
+    """Every package the channel has ever published, withdrawn ones included.
+
+    The ledger does not record builds. Each build is read from the history
+    revision that first published the tag, and that record must carry the same
+    tag and archive checksum as the ledger, so a missing or altered history file
+    fails closed instead of silently weakening the build gate.
+    """
+    history = root / CHANNEL_PATHS[channel].history
+    packages: list[PublishedPackage] = []
+    for tag, record in ledger["releases"].items():
+        revision = record["publishedRevision"]
+        message = f"{channel} history revision {revision} cannot prove the build of {tag}"
+        try:
+            feed = load_json(history / f"{revision}.json")
+            validate_feed(feed, channel)
+        except PublishError as error:
+            raise PublishError(f"{message}: {error}") from error
+        release = feed["release"]
+        require(
+            feed["revision"] == revision
+            and release is not None
+            and release["tag"] == tag
+            and release["archiveSHA256"] == record["archiveSHA256"],
+            message,
+        )
+        packages.append(PublishedPackage(channel, tag, tag_version(tag, channel), int(release["build"])))
+    return packages
+
+
+def require_build_gate(root: Path, channel: str, ledger: dict[str, Any],
+                       verified: dict[str, Any]) -> None:
+    """Require a build above every published package whose X.Y.Z is not newer.
+
+    Both channels count, including withdrawn packages. A package with a higher
+    X.Y.Z does not constrain the build, so a stable hotfix below an open beta
+    line does not need to outrank that beta's build.
+    """
+    version = tag_version(verified["tag"], channel)
+    build = int(verified["build"])
+    packages = published_packages(root, channel, ledger)
+    other = other_channel_ledger(root, channel)
+    if other is not None:
+        packages.extend(published_packages(root, other[0], other[1]))
+    for package in packages:
+        if package.version <= version:
+            require(
+                build > package.build,
+                f"build {build} of {verified['tag']} must be greater than build "
+                f"{package.build} of published {package.channel} {package.tag}",
+            )
+
+
+def apply_operation(root: Path, operation: str, tag: str | None, verified: dict[str, Any] | None,
+                    request_id: str, run_id: str, run_attempt: str,
+                    now: dt.datetime | None = None, *, channel: str = STABLE,
+                    history_revision: int | None = None) -> str:
+    now = now or utc_now()
+    require_channel(channel)
+    if operation == "restore":
+        require(tag in (None, ""), "restore selects a history revision; do not pass a release tag")
+    else:
+        tag_key(tag, channel)
+    paths = CHANNEL_PATHS[channel]
+    feed, ledger = load_channel_state(root, channel)
+    history_path = root / paths.history / f"{feed['revision']}.json"
     require(load_json(history_path) == feed, "current feed is not preserved in history")
     original_feed = copy.deepcopy(feed)
     original_ledger = copy.deepcopy(ledger)
     result = "updated"
+    replaced_tag: str | None = None
 
     if operation == "publish":
         require(verified is not None, "publish requires a verified release")
-        validate_release_record(verified)
+        validate_release_record(verified, channel)
         require(verified["tag"] == tag, "verified release tag differs from request")
         require(tag not in ledger["withdrawnTags"], "withdrawn release cannot be republished")
         current = feed["release"]
@@ -526,14 +691,24 @@ def apply_operation(root: Path, operation: str, tag: str, verified: dict[str, An
             require(current == verified, "published release metadata changed after publication")
             result = "noop"
         else:
-            highest = ledger["highestPublishedVersion"]
-            if highest is not None:
-                require(parse_tag(tag) > parse_tag(f"v{highest}"), "older or equal release cannot replace the feed")
+            released = [tag_key(released_tag, channel) for released_tag in ledger["releases"]]
+            if released:
+                require(tag_key(tag, channel) > max(released), "older or equal release cannot replace the feed")
+            if channel == BETA:
+                _, stable_ledger = load_channel_state(root, STABLE)
+                highest_stable = stable_ledger["highestPublishedVersion"]
+                if highest_stable is not None:
+                    require(
+                        tag_version(tag, channel) > parse_tag(f"v{highest_stable}"),
+                        f"beta {tag} must be newer than every published stable release "
+                        f"(highest is v{highest_stable})",
+                    )
+            require_build_gate(root, channel, ledger, verified)
             revision = next_revision(feed["revision"], now)
             feed = {
                 "schemaVersion": 1,
                 "revision": revision,
-                "channel": "stable",
+                "channel": channel,
                 "generatedAt": isoformat_utc(now),
                 "release": verified,
             }
@@ -557,7 +732,7 @@ def apply_operation(root: Path, operation: str, tag: str, verified: dict[str, An
             feed = {
                 "schemaVersion": 1,
                 "revision": revision,
-                "channel": "stable",
+                "channel": channel,
                 "generatedAt": isoformat_utc(now),
                 "release": None,
             }
@@ -565,24 +740,75 @@ def apply_operation(root: Path, operation: str, tag: str, verified: dict[str, An
             ledger["withdrawnTags"].append(tag)
             ledger["releases"][tag]["status"] = "withdrawn"
             ledger["releases"][tag]["withdrawnRevision"] = revision
+    elif operation == "restore":
+        # The only operation that may point a feed at an older release. It
+        # republishes a revision from this channel's history under a new, higher
+        # revision; clients reject a revision that goes backwards.
+        require(verified is None, "restore does not accept release metadata")
+        require(
+            type(history_revision) is int and history_revision > 0,
+            "restore requires a positive history revision",
+        )
+        require(history_revision <= feed["revision"], "history revision is newer than the current feed")
+        target = load_json(root / paths.history / f"{history_revision}.json")
+        validate_feed(target, channel)
+        require(target["revision"] == history_revision, "history file does not match its revision")
+        restored = target["release"]
+        if restored is not None:
+            restored_tag = restored["tag"]
+            require(restored_tag in ledger["releases"], "restored release is absent from ledger")
+            record = ledger["releases"][restored_tag]
+            require(record["status"] == "published", "withdrawn release cannot be restored")
+            original = load_json(root / paths.history / f"{record['publishedRevision']}.json")
+            validate_feed(original, channel)
+            require(original["release"] == restored, "restored release differs from its original publication")
+        current = feed["release"]
+        if current == restored:
+            result = "noop"
+        else:
+            revision = next_revision(feed["revision"], now)
+            feed = {
+                "schemaVersion": 1,
+                "revision": revision,
+                "channel": channel,
+                "generatedAt": isoformat_utc(now),
+                "release": copy.deepcopy(restored),
+            }
+            ledger["lastRevision"] = revision
+            if current is not None and (restored is None or current["tag"] != restored["tag"]):
+                # The displaced release stops being served, exactly as if it had
+                # been withdrawn, so it cannot be republished by accident.
+                replaced_tag = current["tag"]
+                ledger["withdrawnTags"].append(replaced_tag)
+                ledger["releases"][replaced_tag]["status"] = "withdrawn"
+                ledger["releases"][replaced_tag]["withdrawnRevision"] = revision
     else:
         raise PublishError(f"unsupported operation: {operation}")
 
-    validate_feed(feed)
-    validate_feed_size(feed)
-    validate_ledger(ledger, feed)
+    validate_feed(feed, channel)
+    validate_feed_size(feed, channel)
+    validate_ledger(ledger, feed, channel)
     if result == "updated":
-        atomic_json(feed_path, feed)
-        atomic_json(ledger_path, ledger)
-        atomic_json(root / f"state/history/{feed['revision']}.json", feed)
+        atomic_json(root / paths.feed, feed)
+        atomic_json(root / paths.ledger, ledger)
+        atomic_json(root / paths.history / f"{feed['revision']}.json", feed)
 
     safe_run_id = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)[:100]
     safe_attempt = re.sub(r"[^A-Za-z0-9_.-]", "_", run_attempt)[:30]
     require(safe_run_id != "" and safe_attempt != "", "run identity is missing")
-    audit = {
-        "schemaVersion": 1,
-        "operation": operation,
-        "releaseTag": tag,
+    # Stable publish and withdraw audits keep their original fields; every other
+    # record also names its channel.
+    audit: dict[str, Any] = {"schemaVersion": 1, "operation": operation}
+    if channel != STABLE or operation == "restore":
+        audit["channel"] = channel
+    if operation == "restore":
+        restored_release = feed["release"]
+        audit["releaseTag"] = restored_release["tag"] if restored_release is not None else None
+        audit["historyRevision"] = history_revision
+        audit["replacedReleaseTag"] = replaced_tag
+    else:
+        audit["releaseTag"] = tag
+    audit.update({
         "requestId": request_id,
         "runId": run_id,
         "runAttempt": run_attempt,
@@ -591,15 +817,35 @@ def apply_operation(root: Path, operation: str, tag: str, verified: dict[str, An
         "feedRevisionBefore": original_feed["revision"],
         "feedRevisionAfter": feed["revision"],
         "ledgerChanged": ledger != original_ledger,
-    }
-    atomic_json(root / f"state/audit/{safe_run_id}-{safe_attempt}.json", audit)
+    })
+    atomic_json(root / paths.audit / f"{safe_run_id}-{safe_attempt}.json", audit)
     return result
+
+
+def validate_arguments(operation: str, channel: str, release_tag: str,
+                       history_revision: str) -> int | None:
+    """Check which inputs the operation takes; return the restore revision."""
+    require(operation in OPERATIONS, f"unsupported operation: {operation}")
+    require_channel(channel)
+    if operation == "restore":
+        require(release_tag == "", "restore selects a history revision; do not pass a release tag")
+        require(
+            REVISION_PATTERN.fullmatch(history_revision) is not None,
+            "restore requires --history-revision with a positive integer revision",
+        )
+        return int(history_revision)
+    require(release_tag != "", f"{operation} requires --release-tag")
+    require(history_revision == "", "--history-revision is only valid for restore")
+    tag_key(release_tag, channel)
+    return None
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--operation", required=True, choices=("publish", "withdraw"))
-    result.add_argument("--release-tag", required=True)
+    result.add_argument("--operation", required=True, choices=OPERATIONS)
+    result.add_argument("--channel", choices=CHANNELS, default=STABLE)
+    result.add_argument("--release-tag", default="")
+    result.add_argument("--history-revision", default="")
     result.add_argument("--repo-root", type=Path, default=Path.cwd())
     result.add_argument("--request-id", default="")
     result.add_argument("--run-id", required=True)
@@ -612,6 +858,9 @@ def main() -> int:
     root = args.repo_root.resolve()
     verified = None
     try:
+        history_revision = validate_arguments(
+            args.operation, args.channel, args.release_tag, args.history_revision
+        )
         if args.operation == "publish":
             client = GitHubClient(os.environ.get("GH_TOKEN"))
             client.require_public_source_repository()
@@ -624,7 +873,9 @@ def main() -> int:
                 checksum_asset = find_asset(release, args.release_tag, checksum.name)
                 client.download(archive_asset, archive, MAX_ARCHIVE_BYTES)
                 client.download(checksum_asset, checksum, MAX_CHECKSUM_BYTES)
-                verified = verify_release(release, args.release_tag, archive, checksum)
+                verified = verify_release(
+                    release, args.release_tag, archive, checksum, args.channel
+                )
         result = apply_operation(
             root=root,
             operation=args.operation,
@@ -633,11 +884,14 @@ def main() -> int:
             request_id=args.request_id,
             run_id=args.run_id,
             run_attempt=args.run_attempt,
+            channel=args.channel,
+            history_revision=history_revision,
         )
     except PublishError as error:
         print(f"error: {error}", file=os.sys.stderr)
         return 1
-    print(f"{args.operation} {args.release_tag}: {result}")
+    target = args.release_tag or f"history revision {args.history_revision}"
+    print(f"{args.operation} {args.channel} {target}: {result}")
     return 0
 
 

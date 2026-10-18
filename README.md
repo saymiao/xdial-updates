@@ -14,6 +14,10 @@ Release 和 ZIP 仍在 [`kafeifei/XDial`](https://github.com/kafeifei/XDial)。�
 `GITHUB_TOKEN`：读取公开的 XDial Release，提交生成的元数据，并部署 Pages。无需跨仓库
 PAT。初始 `release: null` 是未部署的安全占位；第一次应直接发布已验证的正式版本。
 
+`site/beta.json` 的占位（`release: null`、revision 1）合入后不会自己上线：它随下一次任意通道的
+publish / withdraw / restore 运行部署（每次运行都上传整个 `site/`），之后每次运行的部署后校验都会
+检查它。
+
 ## 通道
 
 两个通道的 App 身份相同（`com.kafeifei.xdial.app`），只靠 feed 区分。两份 feed 的结构完全相同
@@ -39,6 +43,10 @@ PAT。初始 `release: null` 是未部署的安全占位；第一次应直接发
   且 `X.Y.Z` 不高于新包的包的构建号。`X.Y.Z` 更高的包不构成约束，所以 beta 线开放期间发
   `X.Y.Z` 更低的 stable 热修复时，不要求高于 beta 的构建号。ledger 不记录构建号，门禁从每个
   标签首次发布时的 history 记录读取，并核对标签和 SHA-256；history 缺失或不一致时拒绝发布。
+- 两个通道的状态都必须完整：工作流在运行发布器之前检查 `site/stable.json`、`state/ledger.json`、
+  `site/beta.json`、`state/beta/ledger.json` 都存在，缺任何一个就失败。发布器只在 `site/beta.json`
+  和整个 `state/beta/` 都不存在时才当作「从未有过 beta」；只要留有任何一个 beta 文件，beta 状态
+  就必须完整通过校验，否则拒绝发布。不要手工删除或「重置」beta 状态，要清空 beta feed 用撤回。
 
 ## 发布
 
@@ -54,30 +62,42 @@ canonical HTTPS 地址重新验证完整 JSON：`stable.json` 每次都验，`be
 ```sh
 # stable（channel 省略时默认 stable）
 gh workflow run publish.yml -R saymiao/xdial-updates \
-  -f operation=publish -f release_tag=v0.8.1 -f request_id=my-release-001
+  -f operation=publish -f release_tag=<vX.Y.Z> -f request_id=<request-id>
 
 # beta：源 Release 必须是已公开的 prerelease
 gh workflow run publish.yml -R saymiao/xdial-updates \
-  -f channel=beta -f operation=publish -f release_tag=v0.10.0-beta.1 -f request_id=my-beta-001
+  -f channel=beta -f operation=publish -f release_tag=<vX.Y.Z-beta.N> -f request_id=<request-id>
 ```
 
-更新被全局串行执行（两个通道共用一个并发组，因为每次运行都部署整个 `site/`）。旧版本不能
-覆盖新版本；同一 Release 的重复发布只增加审计记录，不改变 feed。history 保存每次有效 feed，
-audit 保存每次成功调用的结果。验证、API 或部署失败不会把现有 Pages feed 清空；部署失败后可用
-相同命令重跑。run 名称包含操作、通道和 `request_id`，调用方按 `request_id` 找到自己触发的运行。
+旧版本不能覆盖新版本；同一 Release 的重复发布只增加审计记录，不改变 feed。history 保存每次
+有效 feed，audit 保存每次成功调用的结果。验证或 API 失败不会提交任何东西，也不会把现有 Pages
+feed 清空。run 名称包含操作、通道和 `request_id`，调用方按 `request_id` 找到自己触发的运行。
+
+**一次只派发一个运行。** 两个通道的所有操作共用一个并发组（每次运行都部署整个 `site/`）。
+GitHub 对同一个并发组最多保留一个运行中和一个排队中的运行：再派发一个时，已在排队的那个会被
+取消，没有执行。所以派发下一个之前，先等上一个结束（例如 `gh run watch --exit-status`）；被取消的
+运行需要重新派发。stable 热修复要同批发 beta.N+1 时也是如此，逐个派发。
+
+**部署失败时 main 上的状态已经是最终状态。** feed、ledger 和 history 在部署之前就已经提交并推送到
+main。部署失败后，这份状态会跟着**任一通道**的下一次运行一起上线，因为每次运行都上传整个
+`site/`。例如 beta 发布推送成功、部署失败，之后发 stable 时会把这份 beta 一起部署出去，部署后的
+`beta.json` 校验也会通过。所以部署失败后，在运行另一个通道之前，必须先处理失败的那个通道：
+用相同命令重跑（会是 noop 加部署），或者对该通道执行 withdraw / restore 把 feed 改成想要的内容。
+工作流在部署前会把另一个通道已提交的 feed 和线上地址比对一次；不一致（或线上读不到）时在日志里
+给出 warning，写明这次部署会让它从哪个 revision 变成哪个 revision。这一步只提示，不会让运行失败。
 
 ## 撤回
 
 撤回只接受该通道当前 feed 中的 tag，将 `release` 设为 `null`，不会删除 Release 资产，也不会
-要求已安装客户端降级。撤回记录会保留，普通 `publish` 不能意外重新公开同一个 tag。撤回按通道
-执行，不影响另一个通道。
+要求已安装客户端降级。撤回记录会保留，普通 `publish` 和 `restore` 都不能重新公开同一个 tag。
+撤回按通道执行，不影响另一个通道。部署失败的后果与发布相同，见上一节。
 
 ```sh
 gh workflow run publish.yml -R saymiao/xdial-updates \
-  -f operation=withdraw -f release_tag=v0.8.1 -f request_id=withdraw-001
+  -f operation=withdraw -f release_tag=<当前 stable tag> -f request_id=<request-id>
 
 gh workflow run publish.yml -R saymiao/xdial-updates \
-  -f channel=beta -f operation=withdraw -f release_tag=v0.10.0-beta.1 -f request_id=withdraw-beta-001
+  -f channel=beta -f operation=withdraw -f release_tag=<当前 beta tag> -f request_id=<request-id>
 ```
 
 ## 恢复（restore）
@@ -89,19 +109,26 @@ release 的操作，用于 feed 出错时退回最后一份已知良好的内容
 
 - 新 revision 与 publish、withdraw 使用同一规则：`max(当前 revision + 1, 当前毫秒时间戳)`。
 - 只接受本通道 history 中存在、且不晚于当前 revision 的记录；跨通道的 revision 会被拒绝。
-- 目标 release 必须仍是 `published`；已撤回的 release 不能被恢复。目标 release 必须与它首次发布时
-  的 history 记录完全一致。
-- 被替换下来的当前 release 在 ledger 中标为已撤回（与 withdraw 相同），之后不能被普通 `publish`
-  重新公开。下一次发布仍须高于历史最高版本。
+- 目标 release 在 ledger 中必须仍是 `published`；用 withdraw 撤回过的 release 不能被恢复。目标
+  release 必须与它首次发布时的 history 记录完全一致。
+- **工作流中的 restore 会先向 GitHub 确认源 Release 仍然可用：** 源仓库公开；Release 存在、不是
+  draft、prerelease 标志与通道一致；两个资产都在，并重新下载归档，大小与 SHA-256 必须和记录一致，
+  `.sha256` 资产也必须一致。任何一项不满足就拒绝，避免 feed 指向已删除、改回 draft 或被替换的
+  Release。目标是 `release: null` 的 revision 时不需要这一步。
+- **被替换下来的当前 release 在 ledger 中保持 `published`**，只在审计的 `replacedReleaseTag` 里记录。
+  因此选错 revision 的 restore 可以再用一次 restore（指向被替换 release 的 revision）撤销。普通
+  `publish` 仍然不能把它重新发出来，因为它不高于已发布的最高版本；下一次发布仍须高于历史最高版本。
+  要永久退役某个 release，先把它 restore 成当前 release，再 withdraw。
 - 当前 feed 的 release 已经等于目标时为 noop，只写审计；部署失败后可用相同命令重跑。
 - 审计记录额外包含 `channel`、`historyRevision` 和 `replacedReleaseTag`。
 - `restore` 不接受 `release_tag`，必须给 `history_revision`。目标 revision 在
-  `state/history/`（stable）或 `state/beta/history/`（beta）里按文件名查找。
+  `state/history/`（stable）或 `state/beta/history/`（beta）里按文件名查找；先在 history 里核对它的
+  `release` 是不是想要的内容。
 
 ```sh
 gh workflow run publish.yml -R saymiao/xdial-updates \
-  -f channel=stable -f operation=restore -f history_revision=1791940209492 \
-  -f request_id=restore-001
+  -f channel=<stable 或 beta> -f operation=restore -f history_revision=<revision> \
+  -f request_id=<request-id>
 ```
 
 ## 本地演练
@@ -109,31 +136,37 @@ gh workflow run publish.yml -R saymiao/xdial-updates \
 不要手工编辑 `site/*.json` 或 `state/`。其他静态文件（包括 `site/acceptance/`）不会被发布器删除；
 Pages 每次上传整个 `site/`。
 
-需要在正式触发前本地走一次相同协议时，可以运行下面的命令。`--repo-root` 指向一个临时副本，
-不要在要提交的工作区里跑，避免把演练生成的 revision 当成线上状态提交。publish 会读取公开
-Release、下载并验证真实资产；withdraw 和 restore 不访问网络。
+需要在正式触发前本地走一次相同协议时，在仓库根目录运行下面的命令，`--repo-root` 指向一个临时
+clone。不要在要提交的工作区里跑，避免把演练生成的 revision 当成线上状态提交。演练完丢弃整个
+临时目录。
 
 ```sh
 drill="$(mktemp -d)"
 git clone --depth 1 https://github.com/saymiao/xdial-updates.git "$drill"
 
+# publish 会读取公开 Release、下载并验证真实资产（stable 包约 56 MB）。
+# tag 必须高于该通道 ledger 的 highestPublishedVersion，且源 Release 已公开；
+# beta 的 X.Y.Z 还必须高于 stable 的 highestPublishedVersion。
 GH_TOKEN="$(gh auth token)" python3 scripts/publish_feed.py --repo-root "$drill" \
-  --operation publish --release-tag v0.8.1 \
-  --request-id local-bootstrap-check --run-id local --run-attempt 1
+  --operation publish --release-tag <下一个 stable tag> \
+  --request-id local-stable-check --run-id local --run-attempt 1
 
 GH_TOKEN="$(gh auth token)" python3 scripts/publish_feed.py --repo-root "$drill" \
-  --channel beta --operation publish --release-tag v0.10.0-beta.1 \
+  --channel beta --operation publish --release-tag <已公开的 beta prerelease tag> \
   --request-id local-beta-check --run-id local --run-attempt 2
 
+# restore 默认也会向 GitHub 确认并下载目标 Release 的归档。
+# --skip-release-check 只用于离线演练，跳过这一步；在 GitHub Actions 里会被拒绝。
 python3 scripts/publish_feed.py --repo-root "$drill" \
-  --channel stable --operation restore --history-revision 1791940209492 \
+  --channel stable --operation restore --history-revision <revision> --skip-release-check \
   --request-id local-restore-check --run-id local --run-attempt 3
 
 git -C "$drill" status --short && git -C "$drill" diff --stat
 ```
 
-演练 restore 时，先在副本里确认 `site/stable.json` 的新 revision 高于原值、release 与所选 history
-记录一致、被替换的 tag 在 ledger 中变为 `withdrawn`，再丢弃整个副本。
+演练 restore 时，在副本里确认：`site/stable.json` 的新 revision 高于原值；release 与所选 history
+记录一致；被替换的 tag 在 ledger 中仍是 `published`；再 restore 回原来的 revision 可以恢复原状。
+withdraw 不访问网络，可以同样离线演练。
 
 ## 测试
 

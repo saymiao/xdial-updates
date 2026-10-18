@@ -105,6 +105,42 @@ def verify(expected_path: Path, url: str, attempts: int, delay_seconds: float,
     raise PublishError(f"canonical feed verification failed after {attempts} attempts: {last_error}")
 
 
+def describe_pending(expected_path: Path, channel: str,
+                     opener: urllib.request.OpenerDirector | None = None) -> str:
+    """Say whether deploying site/ would change what a channel's URL serves now.
+
+    Every run uploads the whole site/, so a feed that an earlier run committed
+    but never deployed goes live with the next run of either channel. This only
+    reports that before the deployment; it never fails the run.
+    """
+    require_channel(channel)
+    url = CANONICAL_FEED_URLS[channel]
+    try:
+        expected = expected_path.read_bytes()
+        revision = json.loads(expected).get("revision")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError) as error:
+        return f"::warning::cannot read the committed {channel} feed {expected_path}: {error}"
+    opener = opener or urllib.request.build_opener(NoRedirectHandler())
+    try:
+        live = fetch_once(opener, url)
+    except (OSError, urllib.error.URLError, PublishError) as error:
+        return (
+            f"::warning::cannot read {url} ({error}); this deployment will serve the committed "
+            f"{channel} feed revision {revision}"
+        )
+    if live == expected:
+        return f"{url} already serves the committed {channel} feed revision {revision}"
+    try:
+        live_revision = json.loads(live).get("revision")
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        live_revision = "unreadable"
+    return (
+        f"::warning::this deployment changes {url} from revision {live_revision} to the committed "
+        f"revision {revision}. This run did not write the {channel} feed: an earlier run committed it "
+        f"without deploying it, or the URL still serves a cached copy."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channel", choices=CHANNELS, default=STABLE)
@@ -112,7 +148,15 @@ def main() -> int:
     parser.add_argument("--url", default=None)
     parser.add_argument("--attempts", type=int, default=12)
     parser.add_argument("--delay-seconds", type=float, default=5)
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="before deploying: report whether the canonical URL would change; always exits 0",
+    )
     args = parser.parse_args()
+    if args.report_only:
+        print(describe_pending(args.expected, args.channel))
+        return 0
     try:
         if args.attempts < 1 or not 0 <= args.delay_seconds <= 30:
             raise PublishError("retry bounds are invalid")

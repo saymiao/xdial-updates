@@ -43,8 +43,10 @@ permissions:
   pages: write
   id-token: write
 
-# One global group serializes every channel and operation, because each run
-# deploys the whole site/. The name predates channels; keep it unchanged.
+# One global group for every channel and operation, because each run deploys
+# the whole site/. GitHub keeps at most one running and one pending run per
+# group: a newer dispatch cancels the pending one, so wait for a run to finish
+# before dispatching the next. The name predates channels; keep it unchanged.
 concurrency:
   group: stable-feed-publisher
   cancel-in-progress: false
@@ -67,6 +69,17 @@ jobs:
 
       - name: Fast-forward to the latest main
         run: git pull --ff-only origin main
+
+      - name: Require the state of both channels
+        # The build gate compares against both channels' history; refuse to run
+        # if either channel's feed or ledger is missing.
+        run: |
+          for path in site/stable.json state/ledger.json site/beta.json state/beta/ledger.json; do
+            if [ ! -f "$path" ]; then
+              echo "::error::missing $path; restore it from git history before publishing"
+              exit 1
+            fi
+          done
 
       - name: Verify release and generate feed state
         env:
@@ -93,8 +106,7 @@ jobs:
           HISTORY_REVISION: ${{ inputs.history_revision }}
         run: |
           git add -- site/stable.json state/ledger.json state/history state/audit
-          if [ -e site/beta.json ]; then git add -- site/beta.json; fi
-          if [ -e state/beta ]; then git add -- state/beta; fi
+          git add -- site/beta.json state/beta
           if [ "$OPERATION" = restore ]; then
             subject="feed: restore ${CHANNEL} revision ${HISTORY_REVISION}"
           elif [ "$CHANNEL" = stable ]; then
@@ -110,6 +122,19 @@ jobs:
             git commit -m "$subject"
             git push origin HEAD:main
           fi
+
+      - name: Report other channel changes in this deployment
+        # Warning only. The whole site/ is uploaded, so the other channel's
+        # committed feed goes live too, even if an earlier run did not deploy it.
+        env:
+          CHANNEL: ${{ inputs.channel || 'stable' }}
+        run: |
+          for other in stable beta; do
+            if [ "$other" != "$CHANNEL" ]; then
+              python3 scripts/verify_deployment.py \
+                --channel "$other" --expected "site/$other.json" --report-only
+            fi
+          done
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5

@@ -19,7 +19,7 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 
 SOURCE_REPOSITORY = "kafeifei/XDial"
@@ -54,9 +54,12 @@ class ChannelPaths:
 
 
 # Stable keeps the layout it had before channels existed; beta is fully separate.
+BETA_STATE = "state/beta"
 CHANNEL_PATHS = {
     STABLE: ChannelPaths("site/stable.json", "state/ledger.json", "state/history", "state/audit"),
-    BETA: ChannelPaths("site/beta.json", "state/beta/ledger.json", "state/beta/history", "state/beta/audit"),
+    BETA: ChannelPaths(
+        "site/beta.json", f"{BETA_STATE}/ledger.json", f"{BETA_STATE}/history", f"{BETA_STATE}/audit"
+    ),
 }
 
 FEED_KEYS = {"schemaVersion", "revision", "channel", "generatedAt", "release"}
@@ -601,10 +604,19 @@ def load_channel_state(root: Path, channel: str) -> tuple[dict[str, Any], dict[s
 
 
 def other_channel_ledger(root: Path, channel: str) -> tuple[str, dict[str, Any]] | None:
-    """Return the other channel's validated ledger, or None if it was never created."""
+    """Return the other channel's validated ledger, or None if beta never existed.
+
+    Only a repository with neither site/beta.json nor anything under state/beta
+    counts as having no beta history. Any leftover beta file means beta state
+    existed, so it must validate completely; a partially deleted beta state
+    fails closed instead of silently dropping beta builds from the gate.
+    """
     other = BETA if channel == STABLE else STABLE
-    paths = CHANNEL_PATHS[other]
-    if not (root / paths.feed).exists() and not (root / paths.ledger).exists():
+    if (
+        other == BETA
+        and not (root / CHANNEL_PATHS[BETA].feed).exists()
+        and not (root / BETA_STATE).exists()
+    ):
         return None
     return other, load_channel_state(root, other)[1]
 
@@ -662,10 +674,65 @@ def require_build_gate(root: Path, channel: str, ledger: dict[str, Any],
             )
 
 
+def verify_restorable_release(release: dict[str, Any], record: dict[str, Any],
+                              archive: Path, checksum: Path, channel: str) -> None:
+    """Confirm that GitHub still serves the exact archive a restored record names.
+
+    restore only replays history, so without this check it could point the feed
+    at a release that was since deleted, turned back into a draft, or re-uploaded.
+    """
+    validate_release_record(record, channel)
+    tag = record["tag"]
+    require(release.get("tag_name") == tag, "GitHub returned a different release tag")
+    require(release.get("draft") is False, f"restored release {tag} is a draft on GitHub")
+    expected_prerelease = channel == BETA
+    require(
+        release.get("prerelease") is expected_prerelease,
+        f"restored release {tag} prerelease flag no longer matches the {channel} channel",
+    )
+    require(release.get("published_at") is not None, f"restored release {tag} is not published")
+    archive_name = f"XDial-{tag}.zip"
+    archive_asset = find_asset(release, tag, archive_name)
+    checksum_asset = find_asset(release, tag, f"{archive_name}.sha256")
+    require(
+        archive_asset["size"] == record["archiveSize"],
+        f"{archive_name} size on GitHub differs from the restored record",
+    )
+    require(checksum_asset["size"] <= MAX_CHECKSUM_BYTES, "checksum asset is unexpectedly large")
+    require(archive.stat().st_size == record["archiveSize"], "downloaded archive size differs from the restored record")
+    require(checksum.stat().st_size == checksum_asset["size"], "downloaded checksum size differs from GitHub metadata")
+    actual_sha = sha256_file(archive)
+    require(actual_sha == record["archiveSHA256"], f"{archive_name} on GitHub differs from the restored record")
+    require(checksum_from_file(checksum, archive_name) == actual_sha, "archive does not match the published checksum")
+    validate_api_digest(archive_asset, actual_sha)
+    validate_api_digest(checksum_asset, sha256_file(checksum))
+
+
+def confirm_restorable_release(client: "GitHubClient", record: dict[str, Any], channel: str) -> None:
+    """Download and check the source release of a record that restore would serve."""
+    client.require_public_source_repository()
+    tag = record["tag"]
+    release = client.release(tag)
+    with tempfile.TemporaryDirectory(prefix="xdial-restore-") as temporary:
+        archive_name = f"XDial-{tag}.zip"
+        archive = Path(temporary) / archive_name
+        checksum = Path(temporary) / f"{archive_name}.sha256"
+        client.download(find_asset(release, tag, archive.name), archive, MAX_ARCHIVE_BYTES)
+        client.download(find_asset(release, tag, checksum.name), checksum, MAX_CHECKSUM_BYTES)
+        verify_restorable_release(release, record, archive, checksum, channel)
+
+
 def apply_operation(root: Path, operation: str, tag: str | None, verified: dict[str, Any] | None,
                     request_id: str, run_id: str, run_attempt: str,
                     now: dt.datetime | None = None, *, channel: str = STABLE,
-                    history_revision: int | None = None) -> str:
+                    history_revision: int | None = None,
+                    confirm_release: Callable[[dict[str, Any]], None] | None = None) -> str:
+    """Apply one operation to one channel.
+
+    restore needs confirm_release whenever it would serve a release: it is
+    called with that release record before anything is written and must raise
+    PublishError if the source release is no longer available unchanged.
+    """
     now = now or utc_now()
     require_channel(channel)
     if operation == "restore":
@@ -766,6 +833,9 @@ def apply_operation(root: Path, operation: str, tag: str | None, verified: dict[
         if current == restored:
             result = "noop"
         else:
+            if restored is not None:
+                require(confirm_release is not None, "restore requires a source release check")
+                confirm_release(copy.deepcopy(restored))
             revision = next_revision(feed["revision"], now)
             feed = {
                 "schemaVersion": 1,
@@ -775,13 +845,12 @@ def apply_operation(root: Path, operation: str, tag: str | None, verified: dict[
                 "release": copy.deepcopy(restored),
             }
             ledger["lastRevision"] = revision
+            # The displaced release stays "published" in the ledger, so a
+            # mistaken restore can itself be undone by restoring its revision.
+            # publish still cannot bring it back: it is not newer than the
+            # highest published release. The audit names it.
             if current is not None and (restored is None or current["tag"] != restored["tag"]):
-                # The displaced release stops being served, exactly as if it had
-                # been withdrawn, so it cannot be republished by accident.
                 replaced_tag = current["tag"]
-                ledger["withdrawnTags"].append(replaced_tag)
-                ledger["releases"][replaced_tag]["status"] = "withdrawn"
-                ledger["releases"][replaced_tag]["withdrawnRevision"] = revision
     else:
         raise PublishError(f"unsupported operation: {operation}")
 
@@ -850,7 +919,17 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--request-id", default="")
     result.add_argument("--run-id", required=True)
     result.add_argument("--run-attempt", required=True)
+    result.add_argument(
+        "--skip-release-check",
+        action="store_true",
+        help="restore only, local drills only: do not confirm the restored release on GitHub; "
+             "refused inside GitHub Actions",
+    )
     return result
+
+
+def skip_release_check(record: dict[str, Any]) -> None:
+    """Explicitly accept a restored release without asking GitHub (local drills)."""
 
 
 def main() -> int:
@@ -861,6 +940,18 @@ def main() -> int:
         history_revision = validate_arguments(
             args.operation, args.channel, args.release_tag, args.history_revision
         )
+        confirm_release = None
+        if args.skip_release_check:
+            require(args.operation == "restore", "--skip-release-check is only valid for restore")
+            require(
+                os.environ.get("GITHUB_ACTIONS") != "true",
+                "--skip-release-check is for local drills and is refused inside GitHub Actions",
+            )
+            confirm_release = skip_release_check
+        elif args.operation == "restore":
+            restore_client = GitHubClient(os.environ.get("GH_TOKEN"))
+            channel = args.channel
+            confirm_release = lambda record: confirm_restorable_release(restore_client, record, channel)
         if args.operation == "publish":
             client = GitHubClient(os.environ.get("GH_TOKEN"))
             client.require_public_source_repository()
@@ -886,6 +977,7 @@ def main() -> int:
             run_attempt=args.run_attempt,
             channel=args.channel,
             history_revision=history_revision,
+            confirm_release=confirm_release,
         )
     except PublishError as error:
         print(f"error: {error}", file=os.sys.stderr)

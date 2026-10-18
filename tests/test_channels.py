@@ -1,7 +1,9 @@
+import copy
 import datetime as dt
 import hashlib
 import io
 import json
+import os
 import plistlib
 import re
 import shutil
@@ -10,12 +12,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import publish_feed as publisher
 import verify_deployment
@@ -40,25 +45,35 @@ def version_of(tag):
     return re.match(r"v([0-9]+\.[0-9]+\.[0-9]+)", tag).group(1)
 
 
+def seed_placeholder_repository(target, source=None):
+    """Write both channels' placeholder state, with no publications, into target.
+
+    Only the permanent revision-1 history files of source are read. Its feeds
+    and ledgers change with every real publication, and copying them without
+    the matching history would break the fixture after the next publish.
+    """
+    source = ROOT if source is None else source
+    for channel in publisher.CHANNELS:
+        paths = publisher.CHANNEL_PATHS[channel]
+        placeholder = (source / paths.history / "1.json").read_bytes()
+        for relative in (paths.feed, f"{paths.history}/1.json"):
+            (target / relative).parent.mkdir(parents=True, exist_ok=True)
+            (target / relative).write_bytes(placeholder)
+        (target / paths.ledger).write_text(json.dumps(EMPTY_LEDGER), encoding="utf-8")
+
+
 class ChannelFixture(unittest.TestCase):
     """A repository with the stable and beta placeholders and no publications."""
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        (self.root / "site").mkdir()
-        (self.root / "state/history").mkdir(parents=True)
-        (self.root / "state/beta/history").mkdir(parents=True)
-        shutil.copy(ROOT / "state/history/1.json", self.root / "site/stable.json")
-        shutil.copy(ROOT / "state/history/1.json", self.root / "state/history/1.json")
-        (self.root / "state/ledger.json").write_text(json.dumps(EMPTY_LEDGER), encoding="utf-8")
-        shutil.copy(ROOT / "site/beta.json", self.root / "site/beta.json")
-        shutil.copy(ROOT / "state/beta/history/1.json", self.root / "state/beta/history/1.json")
-        shutil.copy(ROOT / "state/beta/ledger.json", self.root / "state/beta/ledger.json")
+        seed_placeholder_repository(self.root)
         self.work = self.root / "fixtures"
         self.work.mkdir()
         self.clock = dt.datetime(2026, 10, 18, 1, 0, 0, tzinfo=dt.timezone.utc)
         self.run = 1000
+        self.confirmed = []
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -140,12 +155,16 @@ class ChannelFixture(unittest.TestCase):
         checksum.unlink()
         return record
 
-    def apply(self, operation, tag, verified=None, *, channel, history_revision=None):
+    def apply(self, operation, tag, verified=None, *, channel, history_revision=None,
+              confirm_release="record"):
+        """Apply an operation; restores record the releases they confirm by default."""
         self.clock += dt.timedelta(minutes=1)
         self.run += 1
+        if confirm_release == "record":
+            confirm_release = self.confirmed.append
         return publisher.apply_operation(
             self.root, operation, tag, verified, "caller-1", str(self.run), "1", self.clock,
-            channel=channel, history_revision=history_revision,
+            channel=channel, history_revision=history_revision, confirm_release=confirm_release,
         )
 
     def publish(self, tag, channel, build):
@@ -427,6 +446,8 @@ class BuildGateTests(ChannelFixture):
             self.publish("v1.3.2", "stable", "1800000300")
 
     def test_missing_beta_state_counts_as_no_beta_history(self):
+        # Only a repository that never had beta state at all: neither
+        # site/beta.json nor anything under state/beta.
         (self.root / "site/beta.json").unlink()
         shutil.rmtree(self.root / "state/beta")
         self.assertEqual(self.publish("v1.3.0", "stable", "1800000100"), "updated")
@@ -435,6 +456,31 @@ class BuildGateTests(ChannelFixture):
         (self.root / "site/beta.json").unlink()
         with self.assertRaisesRegex(publisher.PublishError, "beta.json"):
             self.publish("v1.3.0", "stable", "1800000100")
+
+    def test_partially_deleted_beta_state_fails_closed(self):
+        self.publish("v1.4.0-beta.1", "beta", "1800000200")
+        self.apply("withdraw", "v1.4.0-beta.1", channel="beta")
+        saved = tempfile.TemporaryDirectory()
+        self.addCleanup(saved.cleanup)
+        pristine = Path(saved.name) / "repository"
+        shutil.copytree(self.root, pristine)
+        cases = (
+            ("feed and ledger", ("site/beta.json", "state/beta/ledger.json"), "beta"),
+            ("ledger", ("state/beta/ledger.json",), "ledger.json"),
+            ("feed, ledger and history", ("site/beta.json", "state/beta/ledger.json", "state/beta/history"), "beta"),
+        )
+        for name, removed, message in cases:
+            with self.subTest(removed=name):
+                shutil.rmtree(self.root)
+                shutil.copytree(pristine, self.root)
+                for relative in removed:
+                    path = self.root / relative
+                    shutil.rmtree(path) if path.is_dir() else path.unlink()
+                before = self.stable_state()
+                # Without the beta history, this lower build would pass the gate.
+                with self.assertRaisesRegex(publisher.PublishError, message):
+                    self.publish("v1.4.0", "stable", "1800000150")
+                self.assertEqual(self.stable_state(), before)
 
     def test_builds_of_the_live_repository_are_derivable(self):
         live = Path(self.temporary.name) / "live"
@@ -460,6 +506,7 @@ class RestoreTests(ChannelFixture):
     def test_restore_republishes_history_bytes_under_a_new_revision(self):
         first, second, first_revision = self.publish_two()
         current = self.read("site/stable.json")
+        ledger_before = self.read("state/ledger.json")
         beta_before = self.beta_state()
 
         self.assertEqual(
@@ -473,13 +520,13 @@ class RestoreTests(ChannelFixture):
         expected = dict(original, revision=feed["revision"], generatedAt=feed["generatedAt"])
         self.assertEqual((self.root / "site/stable.json").read_bytes(), publisher.json_payload(expected))
         self.assertEqual(self.read(f"state/history/{feed['revision']}.json"), feed)
+        self.assertEqual(self.confirmed, [original["release"]])
 
+        # Only lastRevision changes: the displaced release stays published.
         ledger = self.read("state/ledger.json")
-        self.assertEqual(ledger["lastRevision"], feed["revision"])
-        self.assertEqual(ledger["releases"][first]["status"], "published")
-        self.assertEqual(ledger["releases"][first]["publishedRevision"], first_revision)
-        self.assertEqual(ledger["releases"][second]["status"], "withdrawn")
-        self.assertEqual(ledger["releases"][second]["withdrawnRevision"], feed["revision"])
+        self.assertEqual(ledger, dict(ledger_before, lastRevision=feed["revision"]))
+        self.assertEqual(ledger["releases"][second]["status"], "published")
+        self.assertEqual(ledger["withdrawnTags"], [])
         self.assertEqual(ledger["highestPublishedVersion"], "1.3.1")
 
         audit = self.read(f"state/audit/{self.run}-1.json")
@@ -498,20 +545,42 @@ class RestoreTests(ChannelFixture):
         self.apply("restore", "", channel="stable", history_revision=first_revision)
         before = self.snapshot("site/stable.json", "state/ledger.json")
         self.assertEqual(
-            self.apply("restore", None, channel="stable", history_revision=first_revision),
+            self.apply("restore", None, channel="stable", history_revision=first_revision,
+                       confirm_release=None),
             "noop",
         )
         self.assertEqual(self.snapshot("site/stable.json", "state/ledger.json"), before)
+        self.assertEqual(len(self.confirmed), 1)
         audit = self.read(f"state/audit/{self.run}-1.json")
         self.assertEqual(audit["result"], "noop")
         self.assertIsNone(audit["replacedReleaseTag"])
         self.assertFalse(audit["ledgerChanged"])
 
-    def test_after_restore_displaced_release_stays_retired(self):
-        _, second, first_revision = self.publish_two()
+    def test_mistaken_restore_can_be_undone_by_restore_only(self):
+        first, second, first_revision = self.publish_two()
+        second_feed = self.read("site/stable.json")
         self.apply("restore", "", channel="stable", history_revision=first_revision)
-        with self.assertRaisesRegex(publisher.PublishError, "cannot be republished"):
+        # publish still refuses to bring the displaced release back.
+        with self.assertRaisesRegex(publisher.PublishError, "older or equal"):
             self.publish(second, "stable", "1800000200")
+        # Restoring the displaced release's revision undoes the mistake.
+        self.assertEqual(
+            self.apply("restore", "", channel="stable", history_revision=second_feed["revision"]),
+            "updated",
+        )
+        feed = self.read("site/stable.json")
+        self.assertEqual(feed["release"], second_feed["release"])
+        self.assertGreater(feed["revision"], second_feed["revision"])
+        audit = self.read(f"state/audit/{self.run}-1.json")
+        self.assertEqual((audit["releaseTag"], audit["replacedReleaseTag"]), (second, first))
+        ledger = self.read("state/ledger.json")
+        self.assertEqual({tag: record["status"] for tag, record in ledger["releases"].items()},
+                         {first: "published", second: "published"})
+        # Restoring all the way back to the placeholder is undoable the same way.
+        self.apply("restore", "", channel="stable", history_revision=1)
+        self.assertIsNone(self.read("site/stable.json")["release"])
+        self.apply("restore", "", channel="stable", history_revision=second_feed["revision"])
+        self.assertEqual(self.read("site/stable.json")["release"], second_feed["release"])
         self.assertEqual(self.publish("v1.3.2", "stable", "1800000300"), "updated")
 
     def test_restore_rejects_withdrawn_release_and_bad_revisions(self):
@@ -549,18 +618,42 @@ class RestoreTests(ChannelFixture):
         with self.assertRaisesRegex(publisher.PublishError, "differs from its original publication"):
             self.apply("restore", "", channel="stable", history_revision=forged["revision"])
 
+    def test_restore_requires_the_source_release_check_before_writing(self):
+        _, _, first_revision = self.publish_two()
+        before = self.stable_state()
+        with self.assertRaisesRegex(publisher.PublishError, "requires a source release check"):
+            self.apply("restore", "", channel="stable", history_revision=first_revision,
+                       confirm_release=None)
+        self.assertEqual(self.stable_state(), before)
+
+        def unavailable(record):
+            raise publisher.PublishError(f"restored release {record['tag']} is a draft on GitHub")
+
+        with self.assertRaisesRegex(publisher.PublishError, "v1.3.0 is a draft"):
+            self.apply("restore", "", channel="stable", history_revision=first_revision,
+                       confirm_release=unavailable)
+        self.assertEqual(self.stable_state(), before)
+
     def test_restore_beta_to_placeholder_leaves_stable_untouched(self):
         self.publish("v1.3.0", "stable", "1800000050")
         _, second, _ = self.publish_two("beta")
         stable_before = self.stable_state()
-        self.assertEqual(self.apply("restore", "", channel="beta", history_revision=1), "updated")
+        self.assertEqual(
+            self.apply("restore", "", channel="beta", history_revision=1, confirm_release=None),
+            "updated",
+        )
         beta = self.read("site/beta.json")
         self.assertIsNone(beta["release"])
         self.assertGreater(beta["revision"], 1)
-        self.assertEqual(self.read("state/beta/ledger.json")["withdrawnTags"], [second])
+        ledger = self.read("state/beta/ledger.json")
+        self.assertEqual(ledger["withdrawnTags"], [])
+        self.assertEqual(ledger["releases"][second]["status"], "published")
         self.assertEqual(self.stable_state(), stable_before)
         audit = self.read(f"state/beta/audit/{self.run}-1.json")
-        self.assertEqual((audit["channel"], audit["releaseTag"]), ("beta", None))
+        self.assertEqual(
+            (audit["channel"], audit["releaseTag"], audit["replacedReleaseTag"]),
+            ("beta", None, second),
+        )
 
     def test_restore_cannot_cross_channels(self):
         _, _, stable_revision = self.publish_two()
@@ -568,6 +661,84 @@ class RestoreTests(ChannelFixture):
         self.assertGreater(self.read("site/beta.json")["revision"], stable_revision)
         with self.assertRaisesRegex(publisher.PublishError, "cannot read valid JSON"):
             self.apply("restore", "", channel="beta", history_revision=stable_revision)
+
+
+class RestorableReleaseTests(ChannelFixture):
+    """The GitHub-side check that runs before restore serves an older release."""
+
+    def source(self, tag, channel, **options):
+        archive, checksum = self.write_archive(tag)
+        record = publisher.verify_release(self.release(tag, archive, checksum), tag, archive, checksum, channel)
+        release = self.release(tag, archive, checksum, **options)
+        return record, release, archive, checksum
+
+    def test_accepts_the_unchanged_public_release_of_each_channel(self):
+        for tag, channel in (("v1.3.0", "stable"), ("v1.4.0-beta.1", "beta")):
+            with self.subTest(channel=channel):
+                record, release, archive, checksum = self.source(tag, channel)
+                release["assets"][0]["digest"] = f"sha256:{record['archiveSHA256']}"
+                publisher.verify_restorable_release(release, record, archive, checksum, channel)
+
+    def test_rejects_release_that_changed_on_github(self):
+        record, release, archive, checksum = self.source("v1.3.0", "stable")
+        cases = (
+            ("draft", lambda r: r.update(draft=True), "is a draft on GitHub"),
+            ("prerelease", lambda r: r.update(prerelease=True), "prerelease flag"),
+            ("unpublished", lambda r: r.update(published_at=None), "not published"),
+            ("other tag", lambda r: r.update(tag_name="v1.3.1"), "different release tag"),
+            ("deleted archive", lambda r: r["assets"].pop(0), "exactly one XDial-v1.3.0.zip"),
+            ("deleted checksum", lambda r: r["assets"].pop(1), "exactly one XDial-v1.3.0.zip.sha256"),
+            ("resized archive", lambda r: r["assets"][0].update(size=r["assets"][0]["size"] + 1),
+             "size on GitHub differs"),
+            ("digest", lambda r: r["assets"][0].update(digest="sha256:" + "1" * 64), "API digest"),
+        )
+        for name, change, message in cases:
+            with self.subTest(case=name):
+                changed = copy.deepcopy(release)
+                change(changed)
+                with self.assertRaisesRegex(publisher.PublishError, message):
+                    publisher.verify_restorable_release(changed, record, archive, checksum, "stable")
+        beta_record, beta_release, beta_archive, beta_checksum = self.source("v1.4.0-beta.1", "beta")
+        beta_release["prerelease"] = False
+        with self.assertRaisesRegex(publisher.PublishError, "prerelease flag no longer matches the beta"):
+            publisher.verify_restorable_release(beta_release, beta_record, beta_archive, beta_checksum, "beta")
+
+    def test_rejects_reuploaded_archive_bytes(self):
+        record, release, archive, checksum = self.source("v1.3.0", "stable")
+        changed = bytearray(archive.read_bytes())
+        changed[-1] ^= 1
+        archive.write_bytes(bytes(changed))
+        self.assertEqual(archive.stat().st_size, record["archiveSize"])
+        with self.assertRaisesRegex(publisher.PublishError, "XDial-v1.3.0.zip on GitHub differs from the restored record"):
+            publisher.verify_restorable_release(release, record, archive, checksum, "stable")
+
+    def test_confirm_downloads_both_assets_from_github(self):
+        record, release, archive, checksum = self.source("v1.4.0-beta.1", "beta")
+        local = {asset["url"]: path for asset, path in zip(release["assets"], (archive, checksum))}
+
+        class Client:
+            calls = []
+
+            def require_public_source_repository(self):
+                self.calls.append("public")
+
+            def release(self, tag):
+                self.calls.append(f"release {tag}")
+                return release
+
+            def download(self, asset, destination, maximum_bytes):
+                self.calls.append(f"download {asset['name']}")
+                shutil.copy(local[asset["url"]], destination)
+
+        client = Client()
+        publisher.confirm_restorable_release(client, record, "beta")
+        self.assertEqual(client.calls, [
+            "public", "release v1.4.0-beta.1",
+            "download XDial-v1.4.0-beta.1.zip", "download XDial-v1.4.0-beta.1.zip.sha256",
+        ])
+        release["prerelease"] = False
+        with self.assertRaisesRegex(publisher.PublishError, "prerelease flag"):
+            publisher.confirm_restorable_release(client, record, "beta")
 
 
 class CommandLineTests(ChannelFixture):
@@ -627,6 +798,123 @@ class CommandLineTests(ChannelFixture):
         )
         self.assertEqual(rejected.returncode, 1)
         self.assertIn("restore requires --history-revision", rejected.stderr)
+
+    def run_cli(self, *arguments, environment=None):
+        command = [
+            sys.executable, str(ROOT / "scripts/publish_feed.py"), *arguments,
+            "--repo-root", str(self.root), "--run-id", "local", "--run-attempt", str(self.run),
+        ]
+        self.run += 1
+        env = {key: value for key, value in os.environ.items() if key != "GITHUB_ACTIONS"}
+        env.update(environment or {})
+        return subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+
+    def test_offline_restore_of_a_release_needs_the_explicit_drill_flag(self):
+        self.publish("v1.3.0", "stable", "1800000100")
+        first = self.read("site/stable.json")
+        self.publish("v1.3.1", "stable", "1800000200")
+        restore = ("--operation", "restore", "--history-revision", str(first["revision"]))
+
+        before = self.stable_state()
+        refused = self.run_cli(*restore, "--skip-release-check", environment={"GITHUB_ACTIONS": "true"})
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("refused inside GitHub Actions", refused.stderr)
+        misused = self.run_cli("--operation", "withdraw", "--release-tag", "v1.3.1", "--skip-release-check")
+        self.assertEqual(misused.returncode, 1)
+        self.assertIn("only valid for restore", misused.stderr)
+        self.assertEqual(self.stable_state(), before)
+
+        drilled = self.run_cli(*restore, "--skip-release-check")
+        self.assertEqual(drilled.returncode, 0, drilled.stderr)
+        self.assertIn(f"restore stable history revision {first['revision']}: updated", drilled.stdout)
+        self.assertEqual(self.read("site/stable.json")["release"], first["release"])
+
+
+class FixtureIsolationTests(ChannelFixture):
+    """Fixtures must not read feeds or ledgers that real publications change.
+
+    Each case copies the repository, publishes into the copy the way the
+    workflow would (beta and stable, a withdrawal, a restore), then reruns the
+    fixture-based suites with ROOT pointing at that copy.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.live = Path(self.temporary.name) / "live"
+        for directory in ("scripts", "site", "state"):
+            shutil.copytree(ROOT / directory, self.live / directory)
+        ledgers = {
+            channel: publisher.load_channel_state(self.live, channel)[1]
+            for channel in publisher.CHANNELS
+        }
+        build = max(
+            (package.build for channel in publisher.CHANNELS
+             for package in publisher.published_packages(self.live, channel, ledgers[channel])),
+            default=1800000000,
+        )
+        highest = {
+            channel: publisher.parse_tag(f"v{ledger['highestPublishedVersion']}")
+            if ledger["highestPublishedVersion"] else (0, 0, 0)
+            for channel, ledger in ledgers.items()
+        }
+        major = max(version[0] for version in highest.values()) + 1
+        stable = highest["stable"]
+        stable_tag = f"v{stable[0]}.{stable[1]}.{stable[2] + 1}"
+        steps = (
+            ("publish", "beta", f"v{major}.0.0-beta.1", build + 1),
+            ("publish", "stable", stable_tag, build + 2),
+            ("publish", "beta", f"v{major}.0.0-beta.2", build + 3),
+            ("withdraw", "beta", f"v{major}.0.0-beta.2", None),
+        )
+        for operation, channel, tag, tag_build in steps:
+            record = None
+            if operation == "publish":
+                record = self.verified(tag, channel, build=str(tag_build))
+            self.clock += dt.timedelta(minutes=1)
+            publisher.apply_operation(
+                self.live, operation, tag, record, "live", f"live-{self.clock:%H%M}", "1", self.clock,
+                channel=channel,
+            )
+        beta_one = self.verified(f"v{major}.0.0-beta.1", "beta", build=str(build + 1))
+        revision = publisher.load_channel_state(self.live, "beta")[1]["releases"][beta_one["tag"]]["publishedRevision"]
+        self.clock += dt.timedelta(minutes=1)
+        publisher.apply_operation(
+            self.live, "restore", "", None, "live", "live-restore", "1", self.clock,
+            channel="beta", history_revision=revision, confirm_release=lambda record: None,
+        )
+        self.assertEqual(publisher.load_channel_state(self.live, "beta")[0]["release"], beta_one)
+
+    def run_against_live(self, module, classes):
+        loader = unittest.defaultTestLoader
+        suite = unittest.TestSuite(loader.loadTestsFromTestCase(case) for case in classes)
+        result = unittest.TestResult()
+        with mock.patch.object(module, "ROOT", self.live):
+            suite.run(result)
+        self.assertGreater(result.testsRun, 0)
+        failures = [f"{test.id()}\n{trace}" for test, trace in result.errors + result.failures]
+        self.assertEqual(failures, [])
+
+    def test_seeded_state_ignores_live_publications(self):
+        seeded = Path(self.temporary.name) / "seeded"
+        seed_placeholder_repository(seeded, self.live)
+        reference = Path(self.temporary.name) / "reference"
+        seed_placeholder_repository(reference)
+        tree = lambda base: {
+            path.relative_to(base).as_posix(): path.read_bytes()
+            for path in sorted(base.rglob("*")) if path.is_file()
+        }
+        self.assertEqual(tree(seeded), tree(reference))
+
+    def test_channel_suites_pass_after_live_publications(self):
+        self.run_against_live(sys.modules[__name__], [
+            BetaReleaseVerificationTests, StableChannelGuardTests, ChannelIndependenceTests,
+            BuildGateTests, RestoreTests, RestorableReleaseTests, CommandLineTests,
+        ])
+
+    def test_publisher_suite_passes_after_live_publications(self):
+        import test_publish_feed
+
+        self.run_against_live(test_publish_feed, [test_publish_feed.PublisherTests])
 
 
 class BetaPlaceholderTests(unittest.TestCase):
@@ -699,10 +987,40 @@ class PublishWorkflowTests(unittest.TestCase):
         self.assertIn('--channel "$CHANNEL"', self.text)
         self.assertIn('--history-revision "$HISTORY_REVISION"', self.text)
 
+    def step(self, name):
+        start = self.text.index(f"      - name: {name}\n")
+        following = self.text.find("\n      - name: ", start + 1)
+        return start, self.text[start:following if following != -1 else len(self.text)]
+
     def test_commit_includes_both_channels(self):
-        self.assertIn("git add -- site/stable.json state/ledger.json state/history state/audit", self.text)
-        self.assertIn("git add -- site/beta.json", self.text)
-        self.assertIn("git add -- state/beta", self.text)
+        _, commit = self.step("Commit generated metadata")
+        self.assertIn("git add -- site/stable.json state/ledger.json state/history state/audit", commit)
+        self.assertIn("git add -- site/beta.json state/beta\n", commit)
+
+    def test_both_channel_states_are_required_before_the_publisher_runs(self):
+        required, check = self.step("Require the state of both channels")
+        publisher_step, _ = self.step("Verify release and generate feed state")
+        self.assertLess(required, publisher_step)
+        self.assertIn(
+            "for path in site/stable.json state/ledger.json site/beta.json state/beta/ledger.json; do",
+            check,
+        )
+        self.assertIn('if [ ! -f "$path" ]; then', check)
+        self.assertIn("exit 1", check)
+
+    def test_other_channel_changes_are_reported_before_deployment(self):
+        commit, _ = self.step("Commit generated metadata")
+        report, body = self.step("Report other channel changes in this deployment")
+        upload, _ = self.step("Upload complete static site")
+        self.assertLess(commit, report)
+        self.assertLess(report, upload)
+        self.assertIn("CHANNEL: ${{ inputs.channel || 'stable' }}", body)
+        self.assertIn('if [ "$other" != "$CHANNEL" ]; then', body)
+        self.assertIn('--channel "$other" --expected "site/$other.json" --report-only', body)
+
+    def test_restore_in_the_workflow_always_checks_the_source_release(self):
+        self.assertNotIn("--skip-release-check", self.text)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", self.text)
 
     def test_deployment_verifies_both_canonical_feeds(self):
         verify = self.text[self.text.index("- name: Verify canonical deployed feeds"):]
@@ -750,6 +1068,47 @@ class BetaDeploymentVerifierTests(unittest.TestCase):
         stable_payload = (ROOT / "site/stable.json").read_bytes()
         with self.assertRaisesRegex(publisher.PublishError, "feed channel must be beta"):
             verify_deployment.validate_payload(stable_payload, "beta")
+
+    class FailingOpener:
+        def open(self, request, timeout):
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    def write_feed(self, directory, feed):
+        path = Path(directory) / "feed.json"
+        path.write_bytes(publisher.json_payload(feed))
+        return path
+
+    def test_report_names_the_other_channel_revision_that_will_go_live(self):
+        url = verify_deployment.CANONICAL_FEED_URLS["beta"]
+        placeholder = json.loads((ROOT / "state/beta/history/1.json").read_bytes())
+        committed = dict(placeholder, revision=1792285260000, generatedAt="2026-10-18T01:01:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_feed(directory, committed)
+            live = publisher.json_payload(placeholder)
+            message = verify_deployment.describe_pending(path, "beta", self.Opener(live, url))
+            self.assertTrue(message.startswith("::warning::"), message)
+            self.assertIn("from revision 1 to the committed revision 1792285260000", message)
+            self.assertIn("This run did not write the beta feed", message)
+            self.assertIn(url, message)
+
+            same = verify_deployment.describe_pending(path, "beta", self.Opener(path.read_bytes(), url))
+            self.assertFalse(same.startswith("::warning::"), same)
+            self.assertIn("already serves the committed beta feed revision 1792285260000", same)
+
+            missing = verify_deployment.describe_pending(path, "beta", self.FailingOpener())
+            self.assertTrue(missing.startswith("::warning::"), missing)
+            self.assertIn("HTTP Error 404", missing)
+            self.assertIn("will serve the committed beta feed revision 1792285260000", missing)
+
+    def test_report_only_never_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            command = [
+                sys.executable, str(ROOT / "scripts/verify_deployment.py"), "--channel", "beta",
+                "--expected", str(Path(directory) / "absent.json"), "--report-only",
+            ]
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("::warning::cannot read the committed beta feed", completed.stdout)
 
     def test_verify_requires_the_url_of_its_channel(self):
         with self.assertRaisesRegex(publisher.PublishError, "canonical beta feed URL"):

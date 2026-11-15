@@ -27,8 +27,16 @@ class PublisherTests(unittest.TestCase):
         (self.root / "site").mkdir()
         (self.root / "state/history").mkdir(parents=True)
         (self.root / "state/audit").mkdir(parents=True)
-        shutil.copy(ROOT / "site/stable.json", self.root / "site/stable.json")
-        shutil.copy(ROOT / "state/ledger.json", self.root / "state/ledger.json")
+        # Seed the initial placeholder state, not the live feed: the live ledger
+        # references history revisions that this fixture does not copy.
+        shutil.copy(ROOT / "state/history/1.json", self.root / "site/stable.json")
+        (self.root / "state/ledger.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "lastRevision": 1,
+            "highestPublishedVersion": None,
+            "releases": {},
+            "withdrawnTags": [],
+        }), encoding="utf-8")
         shutil.copy(ROOT / "state/history/1.json", self.root / "state/history/1.json")
         self.work = self.root / "fixtures"
         self.work.mkdir()

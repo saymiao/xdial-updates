@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "revision": 1795116241747,
+  "channel": "stable",
+  "generatedAt": "2026-11-19T19:24:01Z",
+  "release": {
+    "tag": "v0.9.8",
+    "version": "0.9.8",
+    "build": "1795115742",
+    "minimumSystemVersion": "15.0",
+    "publishedAt": "2026-11-19T19:23:45Z",
+    "releaseNotes": "- AnyConnect 线路长时间没人使用、被服务器按空闲断开后，不再一分钟一次地反复重新登录，而是先进入休眠；下次有访问要走这条线路时自动重新连上。休眠后的第一次访问会多等一次登录的时间（通常 2 秒左右）。\n- 远端服务器或网络中途重置了连接时，App 现在会如实收到“连接被重置”，不再误以为对方正常结束、拿到不完整的数据却不报错。\n- 连接的一方先结束发送后，另一个方向的数据会继续传完，不再整条连接被直接关掉。例如服务器先回复完、App 还在继续上传的情况，现在能正常完成。\n- 连接被远端中断、线路会话结束时，XDial 会在系统日志中记下原因，方便排查网络问题；日志不记录账号和密码。\n- 更新了底层网络组件的维护版本。",
+    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.8/XDial-v0.9.8.zip",
+    "archiveSize": 56458010,
+    "archiveSHA256": "d7aee966acebdba39b1345804001597211421cbeeea818a46538e7abe915fab3"
+  }
+}

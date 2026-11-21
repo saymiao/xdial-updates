@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "revision": 1795289263201,
+  "channel": "stable",
+  "generatedAt": "2026-11-21T19:27:43Z",
+  "release": {
+    "tag": "v0.9.9",
+    "version": "0.9.9",
+    "build": "1795288641",
+    "minimumSystemVersion": "15.0",
+    "publishedAt": "2026-11-21T19:27:25Z",
+    "releaseNotes": "- 菜单栏窗口顶部新增运行状态说明，位于标题和场景之间，未连接时也会显示。它直接说明 XDial 现在的实际状态：\n  - 未连接、正在连接、正在断开、正在重连、唤醒后恢复中，与下方状态栏用同样的文字。\n  - 连接失败会单独显示，不再和普通的“未连接”混在一起。\n  - 已连接时分别说明是“直连运行中（未建立 VPN）”“VPN 线路已连接”还是“分流运行中”，并显示正在运行的场景名称。“VPN 线路已连接”只表示按场景规则使用 VPN，不代表所有流量都走 VPN。\n  - 线路状态还没完全确认时显示“正在确认线路状态”，不会提前宣称已连接。\n- 切换场景准备期间，顶部继续显示原场景的状态，直到新场景真正生效。",
+    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.9/XDial-v0.9.9.zip",
+    "archiveSize": 56469054,
+    "archiveSHA256": "c26628c027a70a1466eff3df8e80239393d12d3c33dc9a7ff92b28c8a668bcfc"
+  }
+}

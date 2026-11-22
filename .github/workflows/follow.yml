@@ -1,0 +1,41 @@
+name: Follow XDial releases
+
+# XDial's release workflow verifies and makes a release public; this workflow
+# notices it and dispatches publish.yml with this repository's own token, so no
+# credential for this repository is kept in XDial. XDial's release job waits
+# for the feed and fails if nothing picks the release up.
+on:
+  schedule:
+    - cron: "7-59/10 * * * *"
+    # GitHub disables schedules after 60 days without repository activity;
+    # re-enabling this workflow once a week resets that.
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: follow-xdial-releases
+  cancel-in-progress: false
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out the latest publisher state
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Keep the schedule enabled
+        if: github.event.schedule == '41 4 * * 1'
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/follow.yml/enable"
+
+      - name: Dispatch the next publication
+        run: python3 scripts/follow_releases.py --request-id "follow-${{ github.run_id }}"

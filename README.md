@@ -48,6 +48,20 @@ publish / withdraw / restore 运行部署（每次运行都上传整个 `site/`�
   和整个 `state/beta/` 都不存在时才当作「从未有过 beta」；只要留有任何一个 beta 文件，beta 状态
   就必须完整通过校验，否则拒绝发布。不要手工删除或「重置」beta 状态，要清空 beta feed 用撤回。
 
+## 自动跟随
+
+XDial 的 release.yml 校验完签名包后自己把 Release 公开，不再派发这里的工作流。
+[follow.yml](.github/workflows/follow.yml) 每 10 分钟查一次 XDial 已公开的 Release，发现某个通道有
+比 ledger 更新、没发布也没撤回过的标签，就用本仓库的 `GITHUB_TOKEN` 派发 `publish.yml`：
+
+- 一次只派发一个，stable 先于 beta；有 `publish.yml` 在排队或运行就等下一次。
+- 同一标签失败两次后不再自动重试，日志给出 warning，修好原因后手工派发。
+- XDial 的 release.yml 会等清单读到新版本，等不到就失败，所以跟随停了会在那边暴露出来。
+- GitHub 会停用 60 天没有活动的仓库的定时任务；follow.yml 每周一用 API 重新启用自己一次。
+  被停用时到 Actions 页面重新启用，再手工运行一次 follow.yml。
+
+手工派发（下面的命令）仍然可用，和跟随不冲突：跟随只挑没发布过的标签，并且等正在跑的运行结束。
+
 ## 发布
 
 源 Release 必须已经公开，且不是 draft。它必须包含精确命名的 ZIP 与 `.sha256` 资产

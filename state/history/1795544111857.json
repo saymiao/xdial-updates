@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "revision": 1795544111857,
+  "channel": "stable",
+  "generatedAt": "2026-11-24T18:15:11Z",
+  "release": {
+    "tag": "v0.9.10",
+    "version": "0.9.10",
+    "build": "1795543406",
+    "minimumSystemVersion": "15.0",
+    "publishedAt": "2026-11-24T18:14:53Z",
+    "releaseNotes": "- 修复 XDial 连接期间会随机占用本机端口的问题。此前 XDial 每代理一条连接，都会在本机额外占用一个临时端口；长时间的连接可能正好占住其他程序要用的固定端口，导致那个程序启动失败、提示端口已被占用（例如 OpenCode 桌面版）。现在 XDial 内部转发不再占用任何本机端口。\n- 本机 SOCKS5 共享的端口和用法不变。",
+    "archiveURL": "https://github.com/kafeifei/XDial/releases/download/v0.9.10/XDial-v0.9.10.zip",
+    "archiveSize": 56527661,
+    "archiveSHA256": "46244ad36f1d8bc16cfbd1449c351424ffb518d8981b9f0885c9e4e09d34bc99"
+  }
+}

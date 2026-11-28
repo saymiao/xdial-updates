@@ -1032,6 +1032,37 @@ class PublishWorkflowTests(unittest.TestCase):
         self.assertLess(verify.index("stable.json"), verify.index("beta.json"))
 
 
+    def job(self, name):
+        header = f"\n  {name}:\n"
+        start = self.text.index(header) + len(header)
+        following = re.search(r"^  [a-z_]+:\n", self.text[start:], re.MULTILINE)
+        end = start + following.start() if following else len(self.text)
+        return self.text[start:end]
+
+    def test_pages_are_deployed_from_a_separate_job(self):
+        # deploy-pages in the job that uploaded the artifact sometimes found no
+        # artifact yet; the deployment runs in its own job after the upload.
+        publish = self.job("publish")
+        deploy = self.job("deploy")
+        self.assertIn("uses: actions/upload-pages-artifact@", publish)
+        self.assertNotIn("actions/deploy-pages@", publish)
+        self.assertNotIn("environment:", publish)
+        self.assertIn("needs: publish", deploy)
+        self.assertIn("name: github-pages", deploy)
+        self.assertIn("ref: ${{ needs.publish.outputs.state_sha }}", deploy)
+        self.assertIn("state_sha: ${{ steps.state.outputs.sha }}", publish)
+        self.assertLess(publish.index("Commit generated metadata"), publish.index("Record the committed state"))
+        self.assertLess(publish.index("Record the committed state"), publish.index("Upload complete static site"))
+        self.assertIn("- name: Verify canonical deployed feeds", deploy)
+
+    def test_deployment_is_retried_once_after_a_delay(self):
+        deploy = self.job("deploy")
+        self.assertEqual(deploy.count("uses: actions/deploy-pages@"), 2)
+        self.assertIn("continue-on-error: true", deploy)
+        self.assertEqual(deploy.count("if: steps.deployment.outcome == 'failure'"), 2)
+        self.assertIn("sleep 30", deploy)
+        self.assertLess(deploy.index("Retry the deployment once"), deploy.index("Verify canonical deployed feeds"))
+
 class BetaDeploymentVerifierTests(unittest.TestCase):
     class Response(io.BytesIO):
         status = 200
